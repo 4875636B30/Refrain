@@ -374,6 +374,8 @@ pub struct App {
     cache_inflight: Arc<Mutex<HashSet<String>>>,
     /// When the cache budget was last enforced.
     last_prune: Instant,
+    /// Whether the "Up next" queue panel is showing.
+    show_queue: bool,
     /// Streams opened ahead of the click (most recent last).
     prefetched: Vec<PrefetchedStream>,
     /// How often each track has been played here, so favourites get warmed.
@@ -537,6 +539,7 @@ impl App {
             cache_queue: Arc::new(Mutex::new(VecDeque::new())),
             cache_inflight: Arc::new(Mutex::new(HashSet::new())),
             last_prune: Instant::now(),
+            show_queue: false,
             prefetched: Vec::new(),
             play_counts: load_play_counts(),
             history: Vec::new(),
@@ -1838,6 +1841,14 @@ impl App {
             .map(|t| t.video_id.clone());
 
         egui::CentralPanel::default().show(ui, |ui| {
+            if self.show_queue {
+                egui::Panel::right("queue")
+                    .resizable(true)
+                    .default_size(300.0)
+                    .show(ui, |ui| {
+                        self.queue_panel(ui, &current_video, &mut action);
+                    });
+            }
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match &view {
@@ -1943,6 +1954,7 @@ impl App {
         action: &mut Option<Action>,
         hovered: &mut Option<Track>,
     ) {
+        let active = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
         for (idx, item) in items.iter().enumerate() {
             let selected = item.video_id.as_deref() == current_video.as_deref();
             let trailing = item.duration_secs.map(crate::ytm::domain::fmt_duration);
@@ -1956,6 +1968,7 @@ impl App {
                 trailing.as_deref(),
                 Some(idx),
                 selected,
+                active,
                 item.playable(),
                 item.navigable(),
             );
@@ -1981,6 +1994,7 @@ impl App {
     ) {
         detail_header(ui, page, &self.thumbnails);
 
+        let active = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
         for (idx, track) in page.tracks.iter().enumerate() {
             let selected = self.current == Some(idx)
                 && current_video.as_deref() == Some(track.video_id.as_str());
@@ -2002,6 +2016,7 @@ impl App {
                 trailing.as_deref(),
                 Some(idx),
                 selected,
+                active,
                 true,
                 false,
             );
@@ -2059,6 +2074,75 @@ impl App {
         }
     }
 
+    /// YouTube Music's "Up next" list. Reuses the ordinary row so the playing
+    /// track carries the same equaliser marker it has everywhere else.
+    fn queue_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        current_video: &Option<String>,
+        action: &mut Option<Action>,
+    ) {
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.label(RichText::new("Up next").size(17.0).strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new(format!("{} in queue", self.queue.len()))
+                        .weak()
+                        .small(),
+                );
+            });
+        });
+        ui.add_space(8.0);
+
+        if self.queue.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.label(RichText::new("Nothing queued yet").weak());
+            });
+            return;
+        }
+
+        let active = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
+        let current = self.current;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (idx, track) in self.queue.iter().enumerate() {
+                    let selected = current == Some(idx)
+                        && current_video.as_deref() == Some(track.video_id.as_str());
+                    let mut segments: Vec<(String, Option<String>)> = Vec::new();
+                    for (position, artist) in track.artists.iter().enumerate() {
+                        if position > 0 {
+                            segments.push((", ".to_string(), None));
+                        }
+                        segments.push((artist.clone(), track.artist_ids.get(position).cloned()));
+                    }
+                    let trailing = track.duration_text();
+                    let row = ui::list_row(
+                        ui,
+                        &self.thumbnails,
+                        ("queue", idx),
+                        track.thumbnail.as_deref(),
+                        &track.title,
+                        &segments,
+                        trailing.as_deref(),
+                        Some(idx),
+                        selected,
+                        active,
+                        true,
+                        false,
+                    );
+                    if row.clicked {
+                        *action = Some(Action::PlayQueueIndex(idx));
+                    }
+                }
+                ui.add_space(10.0);
+            });
+    }
+
     fn bottom_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut toggle_pause = false;
         let mut step = 0i32;
@@ -2066,6 +2150,7 @@ impl App {
         let mut volume = self.volume;
         let mut shuffle = self.shuffle;
         let mut repeat = self.repeat;
+        let mut show_queue = self.show_queue;
 
         egui::Panel::bottom("player")
             .resizable(false)
@@ -2209,6 +2294,10 @@ impl App {
                             if ui.button(if muted { "🔇" } else { "🔊" }).clicked() {
                                 volume = if muted { self.last_volume } else { 0.0 };
                             }
+                            ui.add_space(2.0);
+                            if ui::queue_icon(ui, show_queue, 26.0).clicked() {
+                                show_queue = !show_queue;
+                            }
                         },
                     );
                 });
@@ -2255,6 +2344,7 @@ impl App {
         self.volume = volume;
         self.shuffle = shuffle;
         self.repeat = repeat;
+        self.show_queue = show_queue;
         if volume > 0.001 {
             self.last_volume = volume;
         }

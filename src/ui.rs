@@ -173,6 +173,35 @@ pub fn transport_toggle(
     response
 }
 
+/// A list/queue icon drawn with the painter rather than a glyph, so it cannot
+/// go missing from the bundled fonts.
+pub fn queue_icon(ui: &mut egui::Ui, active: bool, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let visuals = ui.visuals();
+    let tint = if active {
+        ACCENT
+    } else {
+        visuals.weak_text_color()
+    };
+
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 6.0, visuals.widgets.hovered.bg_fill);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let width = size * 0.52;
+    let left = rect.center().x - width / 2.0;
+    for line in 0..3 {
+        let y = rect.center().y + (line as f32 - 1.0) * (size * 0.19);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(egui::pos2(left, y - 1.0), egui::vec2(width, 2.0)),
+            1.0,
+            tint,
+        );
+    }
+    response
+}
+
 /// Lay `contents` out inside a region of exactly `size`.
 ///
 /// `allocate_ui_with_layout` shrinks to fit its content, so a section holding a
@@ -276,6 +305,37 @@ pub struct RowOutcome {
     pub link: Option<String>,
 }
 
+/// YouTube Music marks the playing row with a small equaliser where the track
+/// number would be. The bars animate while playback runs and hold still when it
+/// is paused, so the row still reads as "this one" either way.
+fn draw_equaliser(ui: &egui::Ui, rect: egui::Rect, animating: bool) {
+    const BARS: usize = 3;
+    let (bar_w, gap) = (3.0, 2.0);
+    let total = BARS as f32 * bar_w + (BARS - 1) as f32 * gap;
+    let left = rect.center().x - total / 2.0;
+    let height = rect.height().min(16.0);
+    let time = ui.ctx().input(|i| i.time) as f32;
+
+    for bar in 0..BARS {
+        // A per-bar phase offset stops them moving as one block.
+        let phase = time * 3.2 + bar as f32 * 1.1;
+        let scale = if animating {
+            0.35 + 0.65 * (phase.sin() * 0.5 + 0.5)
+        } else {
+            0.55
+        };
+        let x = left + bar as f32 * (bar_w + gap);
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(x + bar_w / 2.0, rect.center().y),
+                egui::vec2(bar_w, height * scale),
+            ),
+            1.0,
+            ACCENT,
+        );
+    }
+}
+
 /// One clickable list row with a thumbnail.
 #[allow(clippy::too_many_arguments)]
 pub fn list_row(
@@ -288,6 +348,8 @@ pub fn list_row(
     trailing: Option<&str>,
     index: Option<usize>,
     selected: bool,
+    // `active` is playback actually running, which animates the marker.
+    active: bool,
     playable: bool,
     navigable: bool,
 ) -> RowOutcome {
@@ -313,10 +375,13 @@ pub fn list_row(
             .id_salt(id)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            // Show a track number until hovered, then a play affordance.
+            // Show a track number until hovered, then a play affordance — or an
+            // equaliser, if this is the track that is playing.
             let gutter = 22.0;
             let (slot, _) = ui.allocate_exact_size(egui::vec2(gutter, 40.0), egui::Sense::hover());
-            if playable && hovered {
+            if selected {
+                draw_equaliser(ui, slot, active);
+            } else if playable && hovered {
                 ui.painter().text(
                     slot.center(),
                     egui::Align2::CENTER_CENTER,

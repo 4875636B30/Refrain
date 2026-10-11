@@ -234,6 +234,10 @@ Verified working:
 - [x] Resolve-then-fetch: `yt-dlp -g` supplies the URL, but the media is fetched
       by us with a `Range` header (~1 s per track) and reused for ~5 h
 - [x] Playback UI: centred transport controls, custom seek bar, volume
+- [x] YouTube Music's look: brand-red accent, light play disc, an equaliser on
+      the playing row, and an "Up next" queue panel
+- [x] Cached audio is budgeted (2GB, oldest first, never touching anything
+      playing or in flight)
 - [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family
       (incl. Flatpak), with automatic keyring selection, plus `cookies.txt` import
