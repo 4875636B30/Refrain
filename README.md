@@ -1,309 +1,208 @@
-# Refrain
+<p align="center">
+  <img src="packaging/refrain.svg" width="104" alt="">
+</p>
 
-A fast, low-memory desktop client for **YouTube Music**, written in Rust with
-[`egui`](https://github.com/emilk/egui) and [`rodio`](https://github.com/RustAudio/rodio).
+<h1 align="center">Refrain</h1>
 
-Search the catalogue, open albums / artists / playlists, and play tracks — with
-or without signing in.
+<p align="center"><b>YouTube Music, native and fast.</b><br>
+A lightweight desktop client for YouTube Music, written in Rust.</p>
 
-## How it works
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2b2b2b?style=flat-square"></a>
+  <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-000000?style=flat-square&logo=rust&logoColor=white">
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux_x86_64-ff0000?style=flat-square">
+</p>
 
-YouTube Music has no public API, so like other third-party clients this one talks
-to the same internal **InnerTube** endpoints (`music.youtube.com/youtubei/v1/*`)
-that the web app uses, presenting a spoofed `WEB_REMIX` client identity.
+![Refrain's home feed: quick picks, cover art, and the player bar](docs/screenshot.png)
 
-```
-src/
-  main.rs              eframe bootstrap + `--probe`/`--download`/`--auth-check`/
-                       `--page`/`--thumb` debug modes
-  app.rs               app state, background tasks, egui UI
-  config.rs            ~/.config/refrain/config.toml
-  auth.rs              cookie extraction, SAPISIDHASH, browser auto-detect
-  thumbs.rs            artwork fetch (reqwest) + decode (image)
-  ui.rs                theme + reusable widgets (cover grid, list rows)
-  ytm/
-    client.rs          InnerTube HTTP client (search / browse, authenticated)
-    extract.rs         tolerant renderer-tree walking + parsing
-    domain.rs          clean domain types (Track, Page, SearchItem)
-  audio/
-    resolver.rs        yt-dlp: stream args, URL resolution + ranged fetches
-    stream.rs          yt-dlp stdout + seekable buffer (streaming playback)
-    engine.rs          rodio playback (play/pause/seek/volume)
-```
+Refrain plays your YouTube Music library without a browser engine. It talks to
+the same internal endpoints the web app uses, and streams audio through
+`yt-dlp`. No web view and no Electron: the window is up in about half a second
+(0.49 s measured), and the release build holds a steady ~215 MB resident with
+the home feed loaded — it does not creep as you browse.
 
-### Parsing strategy
+Sign in by reusing the session your browser already has — no separate login, no
+password to hand over.
 
-YouTube's response JSON is deeply nested and reshuffled regularly. Rather than
-modelling every layer with `serde` structs (which breaks on every change), the
-parser walks the tree looking for renderer names it recognises
-(`musicResponsiveListItemRenderer`, `musicResponsiveHeaderRenderer`, …). Unknown
-wrappers are simply skipped, so the client keeps working when the layout shifts.
+| | |
+| --- | --- |
+| **Search** | Songs, videos, albums, artists and playlists, grouped into categories with "See more" to expand one. |
+| **Browse** | Home and Library feeds, album / artist / playlist pages, cover-art grids, carousels and "quick picks". |
+| **Playback** | Streams through `yt-dlp` and caches to disk, so replays are instant. Seek, volume, shuffle, repeat, auto-advance. |
+| **Your library** | Thumbs up and down, playlists you can add to, and an "Up next" queue. |
+| **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
+| **Themes** | Light and dark, persisted in the config. |
+| **Keyboard** | Space, arrows, `Shift`+arrows, `/` and `Esc` — see [shortcuts](#keyboard-shortcuts). |
 
-### Feeds
+## Install
 
-The Home/Explore feeds only return a handful of shelves in the first response —
-the rest arrive as you scroll, via continuation tokens. The client pages those
-in automatically (up to a few rounds), so Home ends up with the same shelves the
-real YouTube Music home shows rather than just the first three.
+### Release bundle (Linux x86_64)
 
-### Playback & streaming
-
-Pressing play runs `yt-dlp -f bestaudio[ext=m4a] -o -` and reads the media from
-its **stdout**. `RemoteSource` presents that pipe to `rodio` as a `Read + Seek`
-by buffering everything from offset 0 in a background thread, so playback starts
-as soon as the first bytes arrive instead of after a full download — and seeking
-works even though a pipe isn't seekable. That pipe is also the safety net: if
-anything in the faster path below fails, playback still works.
-
-**Resolving is yt-dlp's job; fetching is ours.** A `googlevideo` URL can't be
-had without solving YouTube's JS signature challenge, so `yt-dlp -g` does the
-resolving (about 6 s). Fetching that URL, though, turned out not to be the
-fragile thing it first looked like:
-
-- Fetch it with an explicit `Range` header. Without one YouTube throttles the
-  *same* URL to ~33 KB/s — which presents as a stall or a 403, and is what made
-  direct fetching look unreliable. With one, a whole track arrives in about a
-  second at 5–9 MB/s.
-- Any user agent works; the request isn't bound to the client that resolved it.
-- Resolved URLs are reused for ~5 h, so fetching a track again skips `yt-dlp`
-  entirely.
-- Audio is mirrored into `~/.cache/refrain/audio/<video_id>.m4a`, so repeats
-  play straight from disk.
-- Opening a page resolves and caches the first several tracks in the background
-  (each is ~1 s of work once resolved), hovering a track for ~150 ms warms it,
-  and starting a track queues the next few.
-- Streams are additionally opened **ahead of time** — when a page or search
-  loads, after a hover, and for the next track in the queue — so pressing play
-  starts in milliseconds instead of waiting on yt-dlp.
-- The two tracks you play most are warmed at startup. Ranking comes from local
-  play counts (`~/.config/refrain/plays.tsv`); with none recorded yet,
-  your YouTube Music history is used, most recent first.
-- If no `m4a` stream is offered, playback falls back to the download path, where
-  ffmpeg transcodes.
-
-The one unavoidable cost is the first `yt-dlp` extraction for a track (roughly
-6 s: ~1.6 s webpage, ~2 s solving YouTube's JS challenges, ~1.5 s startup).
-That work is moved off the critical path by prefetching, so it only shows up if
-you click a track you never hovered and whose page never warmed it.
-
-Getting the URL without yt-dlp is still not an option: every InnerTube client
-that can play returns `signatureCipher` URLs, so it would mean reimplementing
-YouTube's JS signature deciphering — the part yt-dlp exists to maintain.
-
-### Memory
-
-- Artwork is decoded to at most 160 px and cached with a bounded (320-entry)
-  LRU, so browsing large feeds doesn't grow memory without limit.
-- Streams are read from `yt-dlp`'s stdout into memory as needed, and at most two
-  are held open for prefetching.
-
-### Packaging
-
-The binary looks for `yt-dlp` in this order, which makes a self-contained
-distribution possible:
-
-1. `$YTDLP_PATH`
-2. **next to the executable** (ship `yt-dlp_linux` beside the binary)
-3. `~/.local/bin/yt-dlp`
-4. anywhere on `$PATH`
-
-A release bundle is therefore the binary plus `yt-dlp_linux`, plus `ffmpeg`
-(needed only for the download fallback).
-
-Tagging a commit (`git tag v0.1.0 && git push --tags`) runs
-`.github/workflows/release.yml`, which builds with `--locked`, fetches the
-current `yt-dlp_linux`, assembles the bundle, checks that the unpacked binary
-still resolves a track, and attaches it to a GitHub release. The bundle is about
-50 MB, most of it `yt-dlp`.
-
-```
-refrain-<version>-linux-x86_64/
-  refrain              the app
-  yt-dlp_linux         found next to the binary
-  refrain.desktop      launcher entry
-  refrain.svg          icon
-  refrain.metainfo.xml AppStream metadata
-  README.md  LICENSE
-```
-
-To install it for the current user:
+Download the tarball from [Releases](../../releases), then install it for your
+user:
 
 ```sh
 tar xzf refrain-*-linux-x86_64.tar.gz
 cd refrain-*-linux-x86_64
+
 install -Dm755 refrain ~/.local/bin/refrain
 install -Dm644 refrain.svg ~/.local/share/icons/hicolor/scalable/apps/refrain.svg
 install -Dm644 refrain.desktop ~/.local/share/applications/refrain.desktop
 install -Dm644 refrain.metainfo.xml ~/.local/share/metainfo/refrain.metainfo.xml
-# yt-dlp must sit next to the binary for the bundle to be self-contained:
+
+# yt-dlp ships beside the binary, which is where Refrain looks for it first:
 cp yt-dlp_linux ~/.local/bin/yt-dlp_linux
 ```
 
-`packaging/refrain.metainfo.xml` carries placeholder `example` URLs and a
-placeholder reverse-DNS id — replace both with the project's real home before
-publishing. `desktop-file-validate` and `appstreamcli validate` both pass as
-they stand.
+The bundle contains `yt-dlp` so you don't have to install it yourself. `ffmpeg`
+is still needed, but only for the fallback that transcodes a stream the fast path
+couldn't use.
 
-### UI
+### From source
 
-A sidebar (Home / Search / Library) with cover-art grids for albums, artists and
-playlists, list rows for tracks, and a now-playing bar with artwork, transport,
-seek and volume. Dark and light themes, switchable in the sidebar and persisted
-in the config.
+```sh
+git clone https://github.com/OWNER/refrain
+cd refrain
+cargo run --release
+```
 
-### Authentication
+## Requirements
 
-Cookies are reused for two independent jobs:
+**To run it:**
 
-- **Playback** — forwarded straight to `yt-dlp` (`--cookies-from-browser` /
-  `--cookies`) to get past YouTube's bot check.
-- **Catalogue** — sent to InnerTube with a `SAPISIDHASH` `Authorization` header,
-  which makes your library visible.
+- **`yt-dlp`** — found on `PATH`, at `~/.local/bin/yt-dlp`, or set `YTDLP_PATH`.
+  The release bundle ships one.
+- **A JavaScript runtime** — `node` or `deno` on `PATH`. `yt-dlp` needs one to
+  solve YouTube's JS challenges, and Refrain passes `--js-runtimes` for you.
+- **`ffmpeg`** — only for the download fallback.
+- **A signed-in browser** for your library and reliable playback. Anonymous
+  playback is bot-blocked for much of the catalogue.
 
-To avoid re-implementing browser cookie decryption, we drive
-`yt-dlp --cookies-from-browser` to materialise a `cookies.txt`, then parse it.
-Both jobs share that one extraction.
+**To build it:**
 
-On Linux, Chromium-family cookies are encrypted with a key held in the OS
-keyring, and yt-dlp guesses which keyring from `XDG_CURRENT_DESKTOP`. That guess
-is unreliable — and `BASICTEXT` in particular silently fails to decrypt the
-`v11` cookies (you get a handful of cookies and no `SAPISID`). So this client
-tries `GNOMEKEYRING`, `KWALLET6`, `KWALLET` and `BASICTEXT` explicitly, keeps
-whichever yields a `SAPISID`, and remembers it. Pin one with the `keyring`
-config option if you prefer.
+- Rust (stable)
+- `alsa-lib-devel` (ALSA, for `rodio`)
+- X11 and Wayland development libraries (for `eframe`/`winit`)
+- For Chromium-family browsers on Linux, Python **`secretstorage`** may be needed
+  to decrypt cookies from the OS keyring
 
-Extraction takes ~10 s of `yt-dlp`, so the dumped jar is **cached** and reused
-for 45 minutes, and InnerTube is used to verify the cached session still works —
-a rejected jar triggers a fresh extraction. That makes sign-in ready in well
-under a second on subsequent launches. To force a re-extract:
+No D-Bus development headers are needed: the media controls use `zbus`, which is
+pure Rust.
+
+## First run
+
+Refrain looks for a signed-in browser session on startup — Firefox, and the
+Chromium family including Flatpak installs — and reuses whichever one actually
+has a **YouTube** session. A Google login alone isn't enough; InnerTube needs a
+real YouTube session.
+
+If your library looks empty, check what it found:
+
+```sh
+cargo run -- --auth-check
+```
+
+It lists the browsers it detected, whether cookies resolve, and whether
+InnerTube recognises you as logged in. If it reports `anonymous ❌`, open
+<https://music.youtube.com> in that browser, sign in, confirm you can see your
+account, and re-run. To force a fresh extraction:
 
 ```sh
 cargo run -- --auth-check --refresh
 ```
 
-## Requirements
+## Keyboard shortcuts
 
-- Rust (stable)
-- **`yt-dlp`** — on `PATH`, at `~/.local/bin/yt-dlp`, or set `YTDLP_PATH`
-- **A JavaScript runtime** — `node` or `deno` on `PATH`. yt-dlp needs one to
-  solve YouTube's JS challenges; the client passes `--js-runtimes` automatically.
-- **`ffmpeg`** — `sudo dnf install ffmpeg`
-- **`alsa-lib-devel`** on Fedora — `sudo dnf install alsa-lib-devel`
-- For Chromium-family browsers on Linux, Python **`secretstorage`** may be needed
-  to decrypt cookies from the OS keyring.
+| Key | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| `→` / `←` | Seek forward / back 5 s |
+| `Shift`+`→` / `Shift`+`←` | Next / previous track |
+| `/` | Focus search |
+| `Esc` | Back |
 
-## Configuration
+## Status
 
-`~/.config/refrain/config.toml` (created once you change a setting):
+Working today:
 
-```toml
-[auth]
-# auto   = use the first signed-in browser detected (default)
-# browser = force a browser source
-# file   = read an exported cookies.txt
-# none   = never send cookies
-mode = "auto"
-browser = "firefox"          # firefox|chrome|chromium|brave|edge|opera|vivaldi|whale
-keyring = ""                 # BASICTEXT|GNOMEKEYRING|KWALLET|KWALLET5|KWALLET6
-profile = ""                 # explicit profile name or path
-cookies_file = ""            # used when mode = "file"
+- Filtered search, grouped results, and "See more" per category
+- Home and Library feeds, with shelves paged in via continuations
+- Album, artist and playlist pages, with artwork and carousels
+- Streaming playback with on-disk write-through, prefetching and a download fallback
+- Thumbs up / down, playlists you can add to, shuffle, repeat, "Up next" queue
+- MPRIS media controls, media keys and `playerctl`
+- Light and dark themes
+- A release bundle with `yt-dlp` shipped beside the binary
 
-[ui]
-volume = 0.8
-```
+Not built yet:
 
-`auto` looks in both native and **Flatpak** locations, including Firefox's
-modern XDG path (`~/.config/mozilla/firefox`) and Flatpak data dirs such as
-`~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser`.
+- Renaming, deleting and removing tracks from playlists. The API is in place,
+  but the app can't yet tell which playlists you own, and offering "Delete
+  playlist" on a guess isn't worth it.
+- An in-app settings panel — edit `config.toml` for now
+- Packaging beyond the tarball (no Flatpak, AUR or `.deb` yet)
 
-Environment variables still work as a fallback: `YTDLP_COOKIES`,
-`YTDLP_COOKIES_FROM_BROWSER`.
+Known limitations:
 
-## Diagnosing sign-in
+- **Anonymous playback is unreliable.** YouTube bot-blocks much of the catalogue
+  without a signed-in session.
+- **The first play of a track takes a few seconds** while `yt-dlp` resolves the
+  stream URL. Prefetching hides this for tracks you hover or that a page warms;
+  repeats are instant.
+- **`yt-dlp` is a hard dependency.** Getting the stream URL means solving
+  YouTube's JS challenges, which is the part `yt-dlp` exists to maintain —
+  [why that isn't reimplemented](docs/architecture.md#why-the-cipher-isnt-reimplemented).
+- The InnerTube endpoints are unofficial and may need updating over time.
 
-```sh
-# Lists detected browsers, shows whether cookies resolve, and reports whether
-# InnerTube actually recognises you as logged in.
-cargo run -- --auth-check
-```
-
-If it reports `anonymous ❌`, open <https://music.youtube.com> in the browser
-you're extracting from, sign in, confirm you can see your account, then re-run.
-A Google login alone is not enough — InnerTube needs a real **YouTube** session
-(`LOGIN_INFO`).
-
-## Build & run
+## Development
 
 ```sh
-cargo run --release
+cargo run --release          # run it
+cargo fmt --all --check      # formatting
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-Other non-GUI checks:
+Useful diagnostics, all of which run without a GUI:
 
 ```sh
+cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --probe "daft punk"      # exercise search + browse
-cargo run -- --page FEmusic_home       # dump a page's tracks and shelves
+cargo run -- --page FEmusic_home      # dump a page's tracks and shelves
 cargo run -- --stream <video_id>      # stream + report time-to-first-audio
 cargo run -- --download <video_id>    # resolve, cache, and decode one track
 cargo run -- --decode <path>          # decode a local audio file
 cargo run -- --thumb <url>            # verify the artwork pipeline
-cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --like-status <video_id> # read a track's rating (read-only)
 ```
 
-### Artwork
+Design notes, and the parts that turned out to be less obvious than they looked,
+are in **[docs/architecture.md](docs/architecture.md)**.
 
-Thumbnails are fetched with `reqwest` (the same stack the API client uses) and
-uploaded to egui as textures, downscaled to 256px. egui's built-in HTTP loader
-is *not* used — the `ehttp` backend it pulls in failed to fetch these URLs.
-
-## Status
-
-Verified working:
-
-- [x] Filtered search (All / Songs / Albums / Artists / Playlists)
-- [x] Album, playlist and artist detail pages with artwork
-- [x] Browsable carousels — artist albums/singles/videos, featured playlists, related artists
-- [x] **Streaming playback** via a `yt-dlp` stdout pipe (`RemoteSource`), with
-      on-disk write-through, next-track prefetch and a download fallback
-- [x] Resolve-then-fetch: `yt-dlp -g` supplies the URL, but the media is fetched
-      by us with a `Range` header (~1 s per track) and reused for ~5 h
-- [x] Playback UI: centred transport controls, custom seek bar, volume
-- [x] YouTube Music's look: brand-red accent, light play disc, an equaliser on
-      the playing row, and an "Up next" queue panel
-- [x] Cached audio is budgeted (2GB, oldest first, never touching anything
-      playing or in flight)
-- [x] Thumbs up / down, read from the watch-next response and written back
-      through InnerTube's `like` endpoints (signed in)
-- [x] Desktop media controls (MPRIS, media keys, `playerctl`), via souvlaki
-- [x] Right-click a track to add it to a playlist, or create one on the spot
-- [x] Release bundle with `yt-dlp` shipped beside the binary
-- [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
-- [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family
-      (incl. Flatpak), with automatic keyring selection, plus `cookies.txt` import
-- [x] `SAPISIDHASH`-authenticated InnerTube requests
-- [x] Library and Home feeds
-- [x] Feed shelves paged in via continuations (Home shows the full set, not just
-      the first three)
-- [x] Artwork fetched and decoded off the UI thread (no window freezes)
-
-When several browsers are present, `auto` picks the first one that actually has
-a **YouTube session**, so a logged-out Firefox won't shadow a signed-in Brave.
-
-Not built yet:
-
-- [ ] In-app settings panel for choosing the cookie source (edit `config.toml` for now)
-
-Known limitations:
-
-- Anonymous playback is bot-blocked for much of the music catalogue; a signed-in
-  browser session is required for reliable playback.
-- The *first* play of a given track waits a few seconds while `yt-dlp` resolves
-  the stream URL; repeats and track changes are then near-instant.
-- Streaming needs an `m4a` stream; otherwise playback falls back to downloading.
-- The InnerTube endpoint/params are unofficial and may need updating over time.
+Contributions are welcome — issues and pull requests both. If you're changing
+how responses are parsed, note that YouTube reshuffles its JSON regularly and the
+parser is deliberately tolerant rather than strict.
 
 ## Legal
 
-For personal, educational use. Respect YouTube's Terms of Service and the rights
-of content owners.
+Refrain is an independent project and is not affiliated with, endorsed by, or
+sponsored by YouTube or Google. "YouTube" is a trademark of Google LLC.
+
+It is intended for personal, educational use. Respect YouTube's Terms of Service
+and the rights of content owners.
+
+## License
+
+[MIT](LICENSE).
+
+## Acknowledgements
+
+Built on [egui](https://github.com/emilk/egui) and
+[eframe](https://github.com/emilk/egui/tree/master/crates/eframe),
+[rodio](https://github.com/RustAudio/rodio),
+[yt-dlp](https://github.com/yt-dlp/yt-dlp),
+[souvlaki](https://github.com/Sinono3/souvlaki) and
+[zbus](https://gitlab.freedesktop.org/dbus/zbus).
+
+The name and icon are this project's own — deliberately not YouTube's
+play-button mark, which is their trademark.

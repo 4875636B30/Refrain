@@ -2946,11 +2946,15 @@ fn detail_header(ui: &mut egui::Ui, page: &Page, thumbs: &HashMap<String, egui::
                 ui.label(RichText::new(&page.description).weak().small());
             }
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(format!("{} tracks", page.tracks.len()))
-                    .weak()
-                    .small(),
-            );
+            // Feeds put their tracks in shelves, so "0 tracks" would be both
+            // wrong and prominent. Only count when there is something to count.
+            if !page.tracks.is_empty() {
+                ui.label(
+                    RichText::new(format!("{} tracks", page.tracks.len()))
+                        .weak()
+                        .small(),
+                );
+            }
         });
     });
     ui.add_space(10.0);
