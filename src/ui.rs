@@ -371,6 +371,9 @@ fn cover_tile(
     response
 }
 
+/// Stable id for the search field, so keyboard shortcuts can focus it.
+pub const SEARCH_ID: &str = "refrain_search_field";
+
 /// A rounded search pill. Returns `true` when the user submits (Enter).
 pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
     let mut submitted = false;
@@ -395,6 +398,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
                 egui::TextEdit::singleline(query)
                     // Transparent so the pill provides the background.
                     .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 3)))
+                    .id(egui::Id::new(SEARCH_ID))
                     .hint_text("Search songs, albums, artists…")
                     .desired_width(width),
             );

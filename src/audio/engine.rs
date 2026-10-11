@@ -61,6 +61,13 @@ impl AudioEngine {
         self.device_error.lock().ok()?.take()
     }
 
+    /// Whether an error message describes a transient glitch (a buffer
+    /// underrun) rather than the device going away.
+    pub fn is_underrun(message: &str) -> bool {
+        let lower = message.to_lowercase();
+        lower.contains("underrun") || lower.contains("overrun")
+    }
+
     /// Decode `path` and start playing it, replacing any current track.
     pub fn play_file(&mut self, path: &Path, track: Track) -> Result<()> {
         self.stop();

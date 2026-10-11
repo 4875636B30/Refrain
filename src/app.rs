@@ -141,6 +141,33 @@ fn save_play_counts(counts: &HashMap<String, u32>) {
     let _ = std::fs::write(path, text);
 }
 
+/// How the queue advances when a track ends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    Off,
+    All,
+    One,
+}
+
+/// A pseudo-random queue index, without pulling in a dependency.
+fn random_index(len: usize, avoid: Option<usize>) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()) ^ d.as_secs())
+        .unwrap_or(1);
+    seed ^= seed << 13;
+    seed ^= seed >> 7;
+    seed ^= seed << 17;
+    let mut index = (seed % len as u64) as usize;
+    if Some(index) == avoid {
+        index = (index + 1) % len;
+    }
+    index
+}
+
 /// One category of search results.
 struct SearchSection {
     filter: SearchFilter,
@@ -298,6 +325,8 @@ pub struct App {
     more_rounds: u32,
     /// Rounds of playlist paging for the current page.
     track_rounds: u32,
+    shuffle: bool,
+    repeat: Repeat,
     /// Visited views, so Back returns where the user came from.
     view_history: Vec<(Nav, View)>,
     /// Whether the home feed still needs reloading now that we're signed in.
@@ -311,6 +340,10 @@ pub struct App {
     last_volume: f32,
     /// When we last rebuilt the audio device, to avoid hot-looping.
     last_audio_recovery: Option<Instant>,
+    /// Count of transient buffer underruns, for throttled logging.
+    underruns: u32,
+    /// Last artwork scan, so per-frame work stays cheap.
+    last_thumb_scan: Instant,
 
     img_http: reqwest::Client,
     thumbnails: HashMap<String, egui::TextureHandle>,
@@ -329,7 +362,8 @@ impl App {
             .build()?;
         let cfg = Config::load();
         // Start anonymous; cookies are resolved in the background below.
-        let client = Arc::new(Client::new("en", "US", None)?);
+        let (lang, country) = Config::locale();
+        let client = Arc::new(Client::new(&lang, &country, None)?);
 
         let (audio, audio_error) = match AudioEngine::new() {
             Ok(engine) => (Some(engine), None),
@@ -360,13 +394,14 @@ impl App {
             let tx = tx.clone();
             let ctx = cc.egui_ctx.clone();
             rt.spawn(async move {
+                let (lang, country) = Config::locale();
                 let started = std::time::Instant::now();
                 let mut resolved = crate::auth::resolve(&cfg).await;
 
                 // A reused jar is only trusted if InnerTube still accepts it.
                 let stale = match &resolved {
                     Ok(Some(auth)) => {
-                        match crate::ytm::Client::new("en", "US", Some(auth.jar.clone())) {
+                        match crate::ytm::Client::new(&lang, &country, Some(auth.jar.clone())) {
                             Ok(probe) => !probe.logged_in().await.unwrap_or(false),
                             Err(_) => false,
                         }
@@ -431,6 +466,8 @@ impl App {
             hover_target: None,
             more_rounds: 0,
             track_rounds: 0,
+            shuffle: false,
+            repeat: Repeat::Off,
             view_history: Vec::new(),
             home_needs_reload: false,
             advance_armed: false,
@@ -439,6 +476,8 @@ impl App {
             volume,
             last_volume: if volume > 0.001 { volume } else { 0.8 },
             last_audio_recovery: None,
+            underruns: 0,
+            last_thumb_scan: Instant::now() - Duration::from_secs(1),
             img_http,
             thumbnails: HashMap::new(),
             thumb_order: VecDeque::new(),
@@ -781,12 +820,83 @@ impl App {
         if self.queue.is_empty() {
             return;
         }
-        let n = self.queue.len() as i32;
-        let next = match self.current {
-            Some(cur) => (cur as i32 + delta).rem_euclid(n) as usize,
-            None => 0,
+        let len = self.queue.len();
+        let next = if delta > 0 && self.shuffle {
+            random_index(len, self.current)
+        } else {
+            match self.current {
+                Some(current) => {
+                    let candidate = current as i64 + i64::from(delta);
+                    if candidate < 0 {
+                        if self.repeat == Repeat::All {
+                            len - 1
+                        } else {
+                            0
+                        }
+                    } else if candidate as usize >= len {
+                        if self.repeat == Repeat::All {
+                            0
+                        } else {
+                            len - 1
+                        }
+                    } else {
+                        candidate as usize
+                    }
+                }
+                None => 0,
+            }
         };
         self.play_index(ctx, next);
+    }
+
+    /// Space play/pause, arrows seek or skip, `/` search, `Esc` back.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Don't steal keys while the user is typing.
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (space, left, right, escape, slash, shift) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Slash),
+                i.modifiers.shift,
+            )
+        });
+
+        if slash {
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(ui::SEARCH_ID)));
+            return;
+        }
+        if escape {
+            if let Some((nav, view)) = self.view_history.pop() {
+                self.nav = nav;
+                self.view = view;
+            } else {
+                self.view = View::Search;
+            }
+            return;
+        }
+        if space && let Some(audio) = self.audio.as_ref() {
+            audio.toggle_pause();
+        }
+        if right {
+            if shift {
+                self.step_track(ctx, 1);
+            } else if let Some(audio) = self.audio.as_ref() {
+                audio.seek(audio.position() + Duration::from_secs(5));
+            }
+        }
+        if left {
+            if shift {
+                self.step_track(ctx, -1);
+            } else if let Some(audio) = self.audio.as_ref() {
+                let position = audio.position().saturating_sub(Duration::from_secs(5));
+                audio.seek(position);
+            }
+        }
     }
 
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
@@ -820,6 +930,17 @@ impl App {
         else {
             return;
         };
+
+        // An underrun is a transient glitch. Rebuilding the device would also
+        // restart the track, which is far worse than a brief dropout.
+        if AudioEngine::is_underrun(&error) {
+            self.underruns += 1;
+            if self.underruns == 1 || self.underruns.is_multiple_of(20) {
+                eprintln!("[audio] buffer underrun (x{}) — {error}", self.underruns);
+            }
+            return;
+        }
+
         eprintln!("[audio] output device error: {error}");
 
         if let Some(last) = self.last_audio_recovery
@@ -965,10 +1086,11 @@ impl App {
                     }
                     match result {
                         Ok(Some(resolved)) => {
+                            let (lang, country) = Config::locale();
                             let youtube = resolved.jar.has_youtube_session();
                             // Remember the source that worked so yt-dlp uses it too.
                             self.auth = resolved.source.clone();
-                            match Client::new("en", "US", Some(resolved.jar)) {
+                            match Client::new(&lang, &country, Some(resolved.jar)) {
                                 Ok(client) => {
                                     self.client = Arc::new(client);
                                     self.authenticated = true;
@@ -1169,8 +1291,21 @@ impl App {
             return;
         }
         self.advance_armed = false;
+        if self.repeat == Repeat::One
+            && let Some(current) = self.current
+        {
+            self.play_index(ctx, current);
+            return;
+        }
+        if self.shuffle && !self.queue.is_empty() {
+            self.play_index(ctx, random_index(self.queue.len(), self.current));
+            return;
+        }
         match self.current {
-            Some(cur) if cur + 1 < self.queue.len() => self.play_index(ctx, cur + 1),
+            Some(current) if current + 1 < self.queue.len() => self.play_index(ctx, current + 1),
+            Some(_) if self.repeat == Repeat::All && !self.queue.is_empty() => {
+                self.play_index(ctx, 0)
+            }
             _ => {
                 self.current = None;
                 if let Some(audio) = self.audio.as_mut() {
@@ -1184,6 +1319,15 @@ impl App {
 
     /// Fetch any artwork that will be drawn this frame.
     fn ensure_thumbnails(&mut self, ctx: &egui::Context) {
+        // Scanning every frame means cloning every visible URI and rebuilding a
+        // set of them, which is pure waste while scrolling.
+        const SCAN_INTERVAL: Duration = Duration::from_millis(250);
+        if let Some(remaining) = SCAN_INTERVAL.checked_sub(self.last_thumb_scan.elapsed()) {
+            ctx.request_repaint_after(remaining);
+            return;
+        }
+        self.last_thumb_scan = Instant::now();
+
         let mut uris: Vec<String> = Vec::new();
         {
             let mut push = |slot: &Option<String>| {
@@ -1683,6 +1827,8 @@ impl App {
         let mut step = 0i32;
         let mut seek_to: Option<f32> = None;
         let mut volume = self.volume;
+        let mut shuffle = self.shuffle;
+        let mut repeat = self.repeat;
 
         egui::Panel::bottom("player")
             .resizable(false)
@@ -1755,10 +1901,24 @@ impl App {
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             let spacing = ui.spacing().item_spacing.x;
-                            let buttons = 34.0 + 48.0 + 34.0 + spacing * 2.0;
+                            let buttons = 28.0 + 34.0 + 48.0 + 34.0 + 28.0 + spacing * 4.0;
                             ui.add_space(((centre_width - buttons) / 2.0).max(0.0));
                             // Transport is inert until something is loaded.
                             ui.add_enabled_ui(has_track, |ui| {
+                                let shuffle_tint = if shuffle {
+                                    ui::ACCENT
+                                } else {
+                                    ui.visuals().weak_text_color()
+                                };
+                                if ui
+                                    .selectable_label(
+                                        false,
+                                        RichText::new("🔀").color(shuffle_tint),
+                                    )
+                                    .clicked()
+                                {
+                                    shuffle = !shuffle;
+                                }
                                 if ui::round_button(ui, "⏮", 34.0, false).clicked() {
                                     step = -1;
                                 }
@@ -1768,6 +1928,28 @@ impl App {
                                 }
                                 if ui::round_button(ui, "⏭", 34.0, false).clicked() {
                                     step = 1;
+                                }
+                                let repeat_glyph = match repeat {
+                                    Repeat::Off | Repeat::All => "🔁",
+                                    Repeat::One => "🔂",
+                                };
+                                let repeat_tint = if repeat == Repeat::Off {
+                                    ui.visuals().weak_text_color()
+                                } else {
+                                    ui::ACCENT
+                                };
+                                if ui
+                                    .selectable_label(
+                                        false,
+                                        RichText::new(repeat_glyph).color(repeat_tint),
+                                    )
+                                    .clicked()
+                                {
+                                    repeat = match repeat {
+                                        Repeat::Off => Repeat::All,
+                                        Repeat::All => Repeat::One,
+                                        Repeat::One => Repeat::Off,
+                                    };
                                 }
                             });
                         },
@@ -1822,6 +2004,8 @@ impl App {
             });
 
         self.volume = volume;
+        self.shuffle = shuffle;
+        self.repeat = repeat;
         if volume > 0.001 {
             self.last_volume = volume;
         }
@@ -1853,6 +2037,7 @@ impl eframe::App for App {
 
         self.drain_messages(&ctx);
         self.handle_audio_errors(&ctx);
+        self.handle_shortcuts(&ctx);
         self.ensure_thumbnails(&ctx);
         self.tick_playback(&ctx);
         self.sidebar(ui, &ctx);

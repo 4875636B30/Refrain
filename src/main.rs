@@ -178,6 +178,7 @@ fn auth_check() -> anyhow::Result<()> {
         println!("  - {s}");
     }
 
+    let (lang, country) = config::Config::locale();
     let rt = tokio::runtime::Runtime::new()?;
     let Some(resolved) = rt.block_on(auth::resolve(&cfg))? else {
         println!("\nNo cookie source configured/auto-detected — running anonymously.");
@@ -195,7 +196,7 @@ fn auth_check() -> anyhow::Result<()> {
         resolved.jar.has_youtube_session()
     );
 
-    let client = ytm::Client::new("en", "US", Some(resolved.jar))?;
+    let client = ytm::Client::new(&lang, &country, Some(resolved.jar))?;
     println!("client signed: {}", client.is_authenticated());
     match rt.block_on(client.logged_in()) {
         Ok(true) => println!("InnerTube   : LOGGED IN ✅  (library should load)"),
@@ -210,6 +211,7 @@ fn auth_check() -> anyhow::Result<()> {
 fn search_cmd(query: &str) -> anyhow::Result<()> {
     use ytm::SearchFilter;
 
+    let (lang, country) = config::Config::locale();
     let cfg = config::Config::load();
     let rt = tokio::runtime::Runtime::new()?;
     let jar = rt
@@ -217,7 +219,7 @@ fn search_cmd(query: &str) -> anyhow::Result<()> {
         .ok()
         .flatten()
         .map(|r| r.jar);
-    let client = ytm::Client::new("en", "US", jar)?;
+    let client = ytm::Client::new(&lang, &country, jar)?;
 
     let items = rt.block_on(client.search(query, SearchFilter::All))?;
     println!("{} items (All filter)", items.len());
@@ -380,6 +382,7 @@ fn thumb_cmd(url: &str) -> anyhow::Result<()> {
 }
 
 fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
+    let (lang, country) = config::Config::locale();
     let rt = tokio::runtime::Runtime::new()?;
     let cfg = config::Config::load();
     let jar = rt
@@ -387,7 +390,7 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
         .ok()
         .flatten()
         .map(|r| r.jar);
-    let client = ytm::Client::new("en", "US", jar)?;
+    let client = ytm::Client::new(&lang, &country, jar)?;
     let mut page = rt.block_on(client.browse(browse_id))?;
 
     println!("{:?} | {} | {}", page.kind, page.title, page.subtitle);
@@ -504,6 +507,7 @@ fn download_cmd(video_id: &str) -> anyhow::Result<()> {
 fn probe(query: &str) -> anyhow::Result<()> {
     use ytm::{Client, SearchFilter};
 
+    let (lang, country) = config::Config::locale();
     let rt = tokio::runtime::Runtime::new()?;
     let cfg = config::Config::load();
     let jar = rt
@@ -511,7 +515,7 @@ fn probe(query: &str) -> anyhow::Result<()> {
         .ok()
         .flatten()
         .map(|r| r.jar);
-    let client = Client::new("en", "US", jar)?;
+    let client = Client::new(&lang, &country, jar)?;
 
     println!("== search({query:?}) [Songs] ==");
     let songs = rt.block_on(client.search(query, SearchFilter::Songs))?;

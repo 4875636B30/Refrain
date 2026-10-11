@@ -50,6 +50,33 @@ pub fn cache_dir() -> PathBuf {
     cache_dir_raw()
 }
 
+impl Config {
+    /// The system language and region, used for InnerTube's `hl`/`gl`. Falls
+    /// back to `en`/`US` when the locale doesn't specify them.
+    pub fn locale() -> (String, String) {
+        let raw = std::env::var("LC_ALL")
+            .or_else(|_| std::env::var("LC_MESSAGES"))
+            .or_else(|_| std::env::var("LANG"))
+            .unwrap_or_default();
+
+        let mut parts = raw.split(['_', '.', '@']);
+        let language = parts.next().unwrap_or("").trim();
+        let region = parts.next().unwrap_or("").trim();
+
+        let language = if language.is_empty() {
+            "en".to_string()
+        } else {
+            language.to_string()
+        };
+        let region = if region.len() == 2 {
+            region.to_uppercase()
+        } else {
+            "US".to_string()
+        };
+        (language, region)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
