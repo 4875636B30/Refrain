@@ -19,11 +19,21 @@ pub async fn fetch(client: &reqwest::Client, uri: &str) -> Result<Vec<u8>> {
     Ok(response.bytes().await?.to_vec())
 }
 
-/// Decode image bytes into an egui image, downscaling large artwork (but never
-/// upscaling small images).
+/// Decode image bytes into an egui image.
+///
+/// Artwork is centre-cropped to a square and downscaled. Cropping at decode
+/// time means every tile gets an identical square texture, so grids line up —
+/// YouTube serves a mix of square covers and 16:9 video stills.
 pub fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
     let image = image::load_from_memory(bytes).ok()?;
-    let image = if image.width() > MAX_EDGE || image.height() > MAX_EDGE {
+    let (width, height) = (image.width(), image.height());
+    let side = width.min(height);
+    let image = if width == height {
+        image
+    } else {
+        image.crop_imm((width - side) / 2, (height - side) / 2, side, side)
+    };
+    let image = if side > MAX_EDGE {
         image.thumbnail(MAX_EDGE, MAX_EDGE)
     } else {
         image
@@ -64,5 +74,22 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(decode(b"definitely not an image").is_none());
+    }
+
+    /// Non-square artwork (e.g. 16:9 video stills) must come back square so
+    /// grids line up.
+    #[test]
+    fn crops_to_square() {
+        let source = image::RgbImage::from_fn(120, 40, |x, _| image::Rgb([x as u8, 20, 40]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(source)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encoding test PNG");
+
+        let decoded = decode(&bytes).expect("decoding test PNG");
+        assert_eq!(decoded.size, [40, 40]);
     }
 }

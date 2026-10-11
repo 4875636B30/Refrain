@@ -287,7 +287,9 @@ fn cover_tile(
     selected: bool,
 ) -> egui::Response {
     let art = width - 10.0;
-    let height = art + 50.0;
+    // Square art plus one line each for title and subtitle. A fixed height keeps
+    // rows aligned however long the text is.
+    let height = art + 46.0;
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let hovered = response.hovered();
@@ -311,10 +313,10 @@ fn cover_tile(
         |ui| {
             ui.set_max_width(art);
             draw_thumbnail(ui, item.thumbnail.as_deref(), thumbs, egui::vec2(art, art), 7.0);
-            ui.add_space(5.0);
-            ui.label(RichText::new(&item.title).strong());
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(&item.title).strong()).truncate());
             if !item.subtitle.is_empty() {
-                ui.label(RichText::new(&item.subtitle).weak().small());
+                ui.add(egui::Label::new(RichText::new(&item.subtitle).weak().small()).truncate());
             }
         },
     );
@@ -323,6 +325,37 @@ fn cover_tile(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response
+}
+
+/// A rounded search pill. Returns `true` when the user submits (Enter).
+pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
+    let mut submitted = false;
+    let visuals = ui.visuals();
+    let frame = egui::Frame::new()
+        .fill(visuals.extreme_bg_color)
+        .stroke(egui::Stroke::new(
+            1.0,
+            visuals.widgets.inactive.bg_stroke.color,
+        ))
+        .corner_radius(egui::CornerRadius::same(16))
+        .inner_margin(egui::Margin::symmetric(12, 6));
+
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("🔍").weak());
+            let edit = ui.add(
+                egui::TextEdit::singleline(query)
+                    // Transparent so the pill provides the background.
+                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
+                    .hint_text("Search songs, albums, artists…")
+                    .desired_width(width),
+            );
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                submitted = true;
+            }
+        });
+    });
+    submitted
 }
 
 /// Lay out items as a wrapping grid of cover tiles.

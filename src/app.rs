@@ -73,7 +73,8 @@ enum View {
 enum Action {
     Open(String),
     PlayQueueIndex(usize),
-    PlaySingle(Track),
+    /// Play within a surrounding list so next/prev move through it.
+    PlayList { tracks: Vec<Track>, index: usize },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,7 +94,12 @@ struct PrefetchedStream {
 fn activate(items: &[SearchItem], idx: usize) -> Option<Action> {
     let item = items.get(idx)?;
     if item.playable() {
-        item.to_track().map(Action::PlaySingle)
+        // Play inside the surrounding list, so next/prev walk it instead of
+        // looping on a single track.
+        let tracks: Vec<Track> = items.iter().filter_map(|i| i.to_track()).collect();
+        let video_id = item.video_id.as_deref()?;
+        let index = tracks.iter().position(|t| t.video_id == video_id)?;
+        Some(Action::PlayList { tracks, index })
     } else {
         item.browse_id.clone().map(Action::Open)
     }
@@ -508,9 +514,9 @@ impl App {
         match action {
             Action::Open(id) => self.open_page(ctx, id),
             Action::PlayQueueIndex(idx) => self.play_index(ctx, idx),
-            Action::PlaySingle(track) => {
-                self.queue = vec![track];
-                self.play_index(ctx, 0);
+            Action::PlayList { tracks, index } => {
+                self.queue = tracks;
+                self.play_index(ctx, index);
             }
         }
     }
@@ -874,16 +880,12 @@ impl App {
                 {
                     go_back = true;
                 }
-                ui.add_space(6.0);
-                ui.label(RichText::new("🔍").weak());
-                let edit = ui.add_sized(
-                    egui::vec2(430.0, 30.0),
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Search songs, albums, artists…"),
-                );
-                let submitted =
-                    edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(4.0);
+                if ui::search_bar(ui, &mut self.query, 360.0) {
+                    do_search = true;
+                }
 
+                ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("search_filter")
                     .selected_text(self.filter.label())
                     .show_ui(ui, |ui| {
@@ -892,7 +894,7 @@ impl App {
                         }
                     });
 
-                if ui.button("Search").clicked() || submitted {
+                if ui.button("Search").clicked() {
                     do_search = true;
                 }
                 if self.busy {
