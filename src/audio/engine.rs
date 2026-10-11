@@ -63,9 +63,16 @@ impl AudioEngine {
 
     /// Whether an error message describes a transient glitch (a buffer
     /// underrun) rather than the device going away.
+    ///
+    /// ALSA reports an XRun two ways: rodio's own "Buffer underrun/overrun
+    /// occurred." and `poll()` on the PCM returning `POLLERR`. They arrive as
+    /// separate callbacks for the same event, so treating only the first as
+    /// transient meant the other looked like a dead device and rebuilt the
+    /// output stream — interrupting playback to fix a glitch that had already
+    /// passed.
     pub fn is_underrun(message: &str) -> bool {
         let lower = message.to_lowercase();
-        lower.contains("underrun") || lower.contains("overrun")
+        lower.contains("underrun") || lower.contains("overrun") || lower.contains("pollerr")
     }
 
     /// Decode `path` and start playing it, replacing any current track.
@@ -157,5 +164,32 @@ impl AudioEngine {
         if let Some(player) = &self.player {
             player.set_volume(self.volume);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioEngine;
+
+    /// ALSA reports a single XRun twice: as rodio's underrun message and as
+    /// `POLLERR` from `poll()` on the PCM. Both must read as transient, or the
+    /// second one looks like a dead device and rebuilds the output stream
+    /// mid-track — interrupting playback to "fix" a glitch that already passed.
+    #[test]
+    fn both_reports_of_an_xrun_are_transient() {
+        assert!(AudioEngine::is_underrun(
+            "Buffer underrun/overrun occurred."
+        ));
+        assert!(AudioEngine::is_underrun(
+            "A backend-specific error has occurred: `alsa::poll()` returned POLLERR"
+        ));
+    }
+
+    /// A device that has genuinely gone away is not a glitch, and must still
+    /// take the recovery path.
+    #[test]
+    fn a_missing_device_is_not_transient() {
+        assert!(!AudioEngine::is_underrun("No such device"));
+        assert!(!AudioEngine::is_underrun("Device is suspended"));
     }
 }

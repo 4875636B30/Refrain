@@ -78,10 +78,14 @@ enum Msg {
 const MAX_THUMB_INFLIGHT: usize = 6;
 
 /// Resolve-and-cache tasks allowed to run at once when warming tracks in the
-/// background. Each one is mostly network plus a `node` subprocess, so a small
-/// pool is the difference between warming a page in ~10s and ~30s. Kept low
-/// enough that an actual play still gets CPU when it needs it.
-const MAX_CACHE_WORKERS: usize = 3;
+/// background. Each one is mostly network plus a `node` subprocess, so a pool
+/// is the difference between warming a page in ~40s and ~20s.
+///
+/// Two rather than three: measured throughput was 1.58x versus 1.67x, which is
+/// not worth a third concurrent `node`. Those processes are CPU-heavy enough to
+/// starve the audio reader thread, and a buffer underrun is far more noticeable
+/// than warming the next track a second later.
+const MAX_CACHE_WORKERS: usize = 2;
 
 /// How often the cache budget is enforced, at the quiet moment after the warm
 /// queue drains. Startup prunes unconditionally.

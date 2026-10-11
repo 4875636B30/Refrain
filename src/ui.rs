@@ -6,6 +6,11 @@ use egui::{Align, Color32, Layout, RichText};
 
 use crate::ytm::SearchItem;
 
+/// Tint behind the row or tile that is currently playing. Deliberately faint:
+/// it only has to say "this one", and the accent equaliser drawn on top of it
+/// needs to stay legible.
+pub const PLAYING_TINT: Color32 = Color32::from_rgba_premultiplied(34, 0, 0, 34);
+
 /// Accent used for selections and highlights.
 /// YouTube's red. This is a YouTube Music client, so the accent is the brand
 /// red — it used to be Spotify green, which read as a Spotify clone.
@@ -358,11 +363,7 @@ pub fn list_row(
     let hovered = response.hovered();
     let mut link: Option<String> = None;
     if selected {
-        ui.painter().rect_filled(
-            rect,
-            6.0,
-            ui.visuals().selection.bg_fill.gamma_multiply(0.35),
-        );
+        ui.painter().rect_filled(rect, 6.0, PLAYING_TINT);
     } else if hovered {
         ui.painter()
             .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
@@ -463,11 +464,7 @@ fn cover_tile(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let hovered = response.hovered();
     if selected {
-        ui.painter().rect_filled(
-            rect,
-            8.0,
-            ui.visuals().selection.bg_fill.gamma_multiply(0.35),
-        );
+        ui.painter().rect_filled(rect, 8.0, PLAYING_TINT);
     } else if hovered {
         ui.painter()
             .rect_filled(rect, 8.0, ui.visuals().widgets.hovered.bg_fill);
