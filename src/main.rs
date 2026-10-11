@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod auth;
 mod config;
+mod media;
 mod thumbs;
 mod ui;
 mod ytm;

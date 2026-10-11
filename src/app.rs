@@ -19,6 +19,7 @@ use egui::{Align, Layout, RichText};
 use crate::audio::{AudioEngine, resolver};
 use crate::auth::ResolvedAuth;
 use crate::config::{AuthConfig, AuthMode, Config};
+use crate::media;
 use crate::thumbs;
 use crate::ui;
 use crate::ytm::domain::LikeStatus;
@@ -55,6 +56,8 @@ enum Msg {
     },
     /// The background cache worker drained its queue.
     CacheIdle,
+    /// A request from the desktop's media controls (media keys, panel, MPRIS).
+    Media(media::Command),
     /// The rating for a track, read from the watch-next response.
     LikeStatus {
         video_id: String,
@@ -90,6 +93,10 @@ const MAX_CACHE_WORKERS: usize = 2;
 /// How often the cache budget is enforced, at the quiet moment after the warm
 /// queue drains. Startup prunes unconditionally.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How often the desktop's media widget is refreshed. MPRIS has no
+/// position-changed signal, so clients poll; once a second is plenty.
+const MEDIA_PUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long a click waits for sign-in before playing without it.
 const DEFERRED_PLAY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -391,6 +398,13 @@ pub struct App {
     last_prune: Instant,
     /// Whether the "Up next" queue panel is showing.
     show_queue: bool,
+    /// Desktop media controls, if the desktop has any.
+    media: media::Controls,
+    /// The track the desktop is currently showing.
+    media_for: Option<String>,
+    last_media_push: Instant,
+    /// The volume the desktop was last told about.
+    media_volume: f32,
     /// The rating shown for the playing track, and whether rating is allowed.
     like_status: LikeStatus,
     likes_allowed: bool,
@@ -484,6 +498,19 @@ impl App {
 
         let (tx, rx) = channel();
 
+        // Desktop media controls: media keys, the panel's media widget, and
+        // `playerctl`. Requests arrive on the same channel as everything else,
+        // so they are handled on the UI thread like any other input.
+        let media_ctx = cc.egui_ctx.clone();
+        let media_tx = tx.clone();
+        let media = media::Controls::new(move |command| {
+            let _ = media_tx.send(Msg::Media(command));
+            media_ctx.request_repaint();
+        });
+        if media.is_connected() {
+            eprintln!("[media] desktop controls connected");
+        }
+
         // Resolve browser cookies off the UI thread so startup stays instant.
         {
             let cfg = cfg.clone();
@@ -561,6 +588,11 @@ impl App {
             cache_inflight: Arc::new(Mutex::new(HashSet::new())),
             last_prune: Instant::now(),
             show_queue: false,
+            media,
+            media_for: None,
+            last_media_push: Instant::now(),
+            // Impossible, so the first tick publishes the real volume.
+            media_volume: -1.0,
             like_status: LikeStatus::Indifferent,
             likes_allowed: false,
             like_for: None,
@@ -1501,6 +1533,7 @@ impl App {
                 Msg::CacheIdle => {
                     self.pump_cache_worker(ctx);
                 }
+                Msg::Media(command) => self.handle_media_command(ctx, command),
                 Msg::LikeStatus { video_id, result } => {
                     self.like_inflight = false;
                     match result {
@@ -1580,6 +1613,112 @@ impl App {
         self.deferred_since = None;
         self.status = Some("Sign-in is taking a while — playing without it".to_string());
         self.play_at(ctx, idx, true);
+    }
+
+    /// Keep the desktop's media widget in step with playback.
+    fn tick_media(&mut self) {
+        let Some(audio) = self.audio.as_ref() else {
+            return;
+        };
+        let playing = audio.is_playing();
+        let position = audio.position();
+        let total = audio.total;
+        let track = audio.now_playing.clone();
+
+        // Metadata only changes when the track does.
+        let video_id = track.as_ref().map(|t| t.video_id.clone());
+        if video_id != self.media_for {
+            self.media_for = video_id;
+            match &track {
+                Some(track) => {
+                    let artist = track.artist_line();
+                    self.media.set_track(
+                        &track.title,
+                        &artist,
+                        track.album.as_deref(),
+                        total,
+                        track.thumbnail.as_deref(),
+                    );
+                }
+                None => self.media.set_stopped(),
+            }
+        }
+
+        // Nothing loaded reads as Stopped; loaded-but-paused reads as Paused.
+        if track.is_none() {
+            self.media.set_stopped();
+        } else if self.last_media_push.elapsed() >= MEDIA_PUSH_INTERVAL {
+            self.last_media_push = Instant::now();
+            self.media.set_playback(playing, position);
+        }
+
+        // Volume is pushed from here alone, so the desktop's value cannot drift
+        // from the app's — including the startup default, which the desktop
+        // would otherwise report as 1.0.
+        if (self.volume - self.media_volume).abs() > 0.001 {
+            self.media_volume = self.volume;
+            self.media.set_volume(self.volume);
+        }
+    }
+
+    /// Act on a request from the desktop's media controls.
+    fn handle_media_command(&mut self, ctx: &egui::Context, command: media::Command) {
+        match command {
+            media::Command::Play => {
+                if let Some(audio) = self.audio.as_ref()
+                    && audio.is_paused()
+                {
+                    audio.toggle_pause();
+                }
+            }
+            media::Command::Pause => {
+                if let Some(audio) = self.audio.as_ref()
+                    && !audio.is_paused()
+                {
+                    audio.toggle_pause();
+                }
+            }
+            media::Command::Toggle => {
+                if let Some(audio) = self.audio.as_ref() {
+                    audio.toggle_pause();
+                }
+            }
+            media::Command::Next => self.step_track(ctx, 1),
+            media::Command::Previous => self.step_track(ctx, -1),
+            media::Command::Stop => {
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.stop();
+                }
+                self.current = None;
+                self.media_for = None;
+                self.media.set_stopped();
+            }
+            media::Command::SeekBy(delta_ms) => {
+                if let Some(audio) = self.audio.as_ref() {
+                    let target = audio
+                        .position()
+                        .as_millis()
+                        .saturating_add_signed(delta_ms as i128);
+                    audio.seek(Duration::from_millis(target as u64));
+                }
+            }
+            media::Command::SeekTo(position) => {
+                if let Some(audio) = self.audio.as_ref() {
+                    audio.seek(position);
+                }
+            }
+            media::Command::SetVolume(volume) => {
+                // The desktop asked, so the app's own volume follows it.
+                self.volume = (volume as f32).clamp(0.0, 1.0);
+                if self.volume > 0.001 {
+                    self.last_volume = self.volume;
+                }
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.set_volume(self.volume);
+                }
+                // The periodic push in `tick_media` publishes this.
+            }
+        }
     }
 
     fn tick_playback(&mut self, ctx: &egui::Context) {
@@ -2516,6 +2655,7 @@ impl eframe::App for App {
         self.tick_playback(&ctx);
         self.tick_deferred_play(&ctx);
         self.tick_like_status(&ctx);
+        self.tick_media();
         self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);
