@@ -66,6 +66,12 @@ enum Msg {
 /// still avoids a thundering herd right after a page loads.
 const MAX_THUMB_INFLIGHT: usize = 6;
 
+/// Resolve-and-cache tasks allowed to run at once when warming tracks in the
+/// background. Each one is mostly network plus a `node` subprocess, so a small
+/// pool is the difference between warming a page in ~10s and ~30s. Kept low
+/// enough that an actual play still gets CPU when it needs it.
+const MAX_CACHE_WORKERS: usize = 3;
+
 /// How many times we page in more shelves for a feed (home/explore/library).
 const MAX_MORE_ROUNDS: u32 = 5;
 
@@ -319,7 +325,8 @@ pub struct App {
     url_cache: HashMap<String, (String, Instant)>,
     /// Tracks queued for background resolve-and-cache.
     cache_queue: Arc<Mutex<VecDeque<String>>>,
-    cache_worker_busy: bool,
+    /// Tracks a worker has claimed but not finished (prevents duplicate work).
+    cache_inflight: Arc<Mutex<HashSet<String>>>,
     /// Streams opened ahead of the click (most recent last).
     prefetched: Vec<PrefetchedStream>,
     /// How often each track has been played here, so favourites get warmed.
@@ -469,7 +476,7 @@ impl App {
             downloading: HashSet::new(),
             url_cache: HashMap::new(),
             cache_queue: Arc::new(Mutex::new(VecDeque::new())),
-            cache_worker_busy: false,
+            cache_inflight: Arc::new(Mutex::new(HashSet::new())),
             prefetched: Vec::new(),
             play_counts: load_play_counts(),
             history: Vec::new(),
@@ -754,7 +761,10 @@ impl App {
     /// is cheap per track; the expensive part is the URL resolution.
     fn enqueue_cache(&mut self, ctx: &egui::Context, video_ids: Vec<String>) {
         for video_id in video_ids {
-            if resolver::cache_path(&video_id).exists() || self.downloading.contains(&video_id) {
+            if resolver::cache_path(&video_id).exists()
+                || self.downloading.contains(&video_id)
+                || self.cache_inflight.lock().unwrap().contains(&video_id)
+            {
                 continue;
             }
             let mut queue = self.cache_queue.lock().unwrap();
@@ -765,40 +775,42 @@ impl App {
         self.pump_cache_worker(ctx);
     }
 
+    /// Resolve-and-cache tracks concurrently.
+    ///
+    /// A resolve is mostly waiting on the network and a node subprocess, so
+    /// running a few at once raises warming throughput far more than batching
+    /// them into one yt-dlp invocation does: the marginal cost of each extra
+    /// track is the per-video JS challenge (~4.5s), not process startup.
     fn pump_cache_worker(&mut self, ctx: &egui::Context) {
-        if self.cache_worker_busy || self.cache_queue.lock().unwrap().is_empty() {
-            return;
-        }
-        self.cache_worker_busy = true;
-        let queue = Arc::clone(&self.cache_queue);
-        let tx = self.tx.clone();
-        let ctx = ctx.clone();
-        let auth = self.auth.clone();
-        // Only the tracks currently queued, with whatever URLs we already have.
-        let queued: Vec<String> = self.cache_queue.lock().unwrap().iter().cloned().collect();
-        let urls: HashMap<String, String> = queued
-            .into_iter()
-            .filter_map(|video_id| self.cached_url(&video_id).map(|url| (video_id, url)))
-            .collect();
-        self.rt.spawn(async move {
-            loop {
-                let Some(video_id) = queue.lock().unwrap().pop_front() else {
-                    break;
-                };
-                let known = urls.get(&video_id).cloned();
+        loop {
+            let mut inflight = self.cache_inflight.lock().unwrap();
+            if inflight.len() >= MAX_CACHE_WORKERS {
+                break;
+            }
+            let Some(video_id) = self.cache_queue.lock().unwrap().pop_front() else {
+                break;
+            };
+            inflight.insert(video_id.clone());
+            drop(inflight);
+
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            let auth = self.auth.clone();
+            let known = self.cached_url(&video_id);
+            let inflight = Arc::clone(&self.cache_inflight);
+            self.rt.spawn(async move {
                 let (url, result) = resolver::resolve_and_fetch(&video_id, &auth, known).await;
                 let result = result.map_err(|e| e.to_string());
-
+                inflight.lock().unwrap().remove(&video_id);
                 let _ = tx.send(Msg::Downloaded {
                     video_id,
                     url,
                     result,
                 });
+                let _ = tx.send(Msg::CacheIdle);
                 ctx.request_repaint();
-            }
-            let _ = tx.send(Msg::CacheIdle);
-            ctx.request_repaint();
-        });
+            });
+        }
     }
 
     fn spawn_download(&mut self, ctx: &egui::Context, video_id: String) {
@@ -852,6 +864,16 @@ impl App {
             // Already opening for this very track — just wait for it.
             self.status = Some(format!("Starting stream for “{}”…", track.title));
             self.pending_play = Some(track);
+        } else if self
+            .cache_inflight
+            .lock()
+            .unwrap()
+            .contains(&track.video_id)
+        {
+            // A background warm is already resolving this track; wait for that
+            // instead of starting a second yt-dlp for the same video.
+            self.status = Some(format!("Starting stream for “{}”…", track.title));
+            self.pending_play = Some(track);
         } else {
             self.status = Some(format!("Starting stream for “{}”…", track.title));
             self.pending_play = Some(track.clone());
@@ -867,7 +889,7 @@ impl App {
             .queue
             .iter()
             .skip(idx + 1)
-            .take(4)
+            .take(6)
             .map(|track| track.video_id.clone())
             .collect();
         self.enqueue_cache(ctx, upcoming);
@@ -1113,7 +1135,7 @@ impl App {
                     let to_cache: Vec<String> = page
                         .tracks
                         .iter()
-                        .take(6)
+                        .take(8)
                         .map(|track| track.video_id.clone())
                         .collect();
                     // Feeds page in their shelves; album/playlist pages don't.
@@ -1352,7 +1374,6 @@ impl App {
                     }
                 }
                 Msg::CacheIdle => {
-                    self.cache_worker_busy = false;
                     self.pump_cache_worker(ctx);
                 }
                 Msg::Image { uri, result } => {

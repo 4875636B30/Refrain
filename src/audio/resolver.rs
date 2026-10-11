@@ -6,6 +6,7 @@
 //! `~/.cache/refrain/audio/<video_id>.m4a`, so replaying a track is
 //! instant and seeking works.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -147,6 +148,19 @@ pub fn stream_args(video_id: &str, auth: &crate::config::AuthConfig) -> Vec<Stri
 const FETCH_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
 
+/// Tried if the first attempt is refused. YouTube's media edges are picky about
+/// agent/range combinations in ways that vary by route, so a second agent is
+/// cheap insurance against a spurious 403.
+const FALLBACK_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+
+/// Size of each ranged request. Big enough that a normal track arrives in one
+/// request, small enough that a long one doesn't need a huge buffer.
+const FETCH_CHUNK: u64 = 16 * 1024 * 1024;
+
+/// Anything smaller than this isn't an audio file worth caching.
+const MIN_AUDIO_BYTES: u64 = 16 * 1024;
+
 /// Resolve a direct, range-capable audio URL with `yt-dlp -g`.
 ///
 /// This still costs a few seconds (YouTube's URLs are ciphered and need solving),
@@ -200,6 +214,55 @@ pub async fn resolve_url(video_id: &str, auth: &crate::config::AuthConfig) -> Re
 /// The explicit `Range` header matters: YouTube throttles un-ranged media
 /// requests (we measured a full track at 33 KB/s without it, and 5–9 MB/s
 /// with), which is what made fetching direct URLs look unreliable.
+/// Fetch and write one bounded range of the media into `scratch`.
+///
+/// Ranges are always *bounded*. An un-ranged GET is throttled to ~33 KB/s, and
+/// an open-ended `bytes=0-` is refused outright (403) for some agent/route
+/// combinations — which is a failure, not a slowdown, so it must be avoided.
+async fn fetch_ranges(
+    http: &reqwest::Client,
+    url: &str,
+    user_agent: &str,
+    scratch: &Path,
+) -> Result<u64> {
+    let mut file = std::fs::File::create(scratch).context("creating cache scratch file")?;
+    let mut written = 0u64;
+
+    loop {
+        let end = written + FETCH_CHUNK - 1;
+        let mut response = http
+            .get(url)
+            .header(reqwest::header::RANGE, format!("bytes={written}-{end}"))
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .send()
+            .await
+            .context("requesting audio")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            bail!("audio request returned HTTP {status}");
+        }
+        // A 200 means the range was ignored and the whole file is coming, so
+        // there is nothing left to ask for afterwards.
+        let whole_file = status == reqwest::StatusCode::OK;
+
+        let mut received = 0u64;
+        while let Some(chunk) = response.chunk().await.context("reading audio body")? {
+            file.write_all(&chunk).context("writing cached audio")?;
+            received += chunk.len() as u64;
+        }
+        written += received;
+
+        // A short response means the file ended inside this range.
+        if whole_file || received == 0 || received < FETCH_CHUNK {
+            break;
+        }
+    }
+
+    file.flush().context("flushing cached audio")?;
+    Ok(written)
+}
+
 pub async fn fetch_audio(url: &str, video_id: &str) -> Result<PathBuf> {
     let dest = cache_path(video_id);
     if is_cached(&dest) {
@@ -211,32 +274,27 @@ pub async fn fetch_audio(url: &str, video_id: &str) -> Result<PathBuf> {
     let scratch = dir.join(format!(".{video_id}.fetch"));
 
     let http = reqwest::Client::builder()
-        .user_agent(FETCH_USER_AGENT)
         .build()
         .context("building HTTP client")?;
 
-    let response = http
-        .get(url)
-        .header(reqwest::header::RANGE, "bytes=0-")
-        .send()
-        .await
-        .context("requesting audio")?;
-
-    if !response.status().is_success() {
-        // A rejected URL is usually one that has expired.
+    // Media URLs live about six hours, but a refusal is not always an expired
+    // URL, so give a second agent a chance before giving up on it.
+    let mut last_error = None;
+    for user_agent in [FETCH_USER_AGENT, FALLBACK_USER_AGENT] {
+        match fetch_ranges(&http, url, user_agent, &scratch).await {
+            Ok(bytes) if bytes >= MIN_AUDIO_BYTES => {
+                std::fs::rename(&scratch, &dest).context("moving audio into cache")?;
+                return Ok(dest);
+            }
+            Ok(bytes) => {
+                last_error = Some(anyhow::anyhow!("audio response was only {bytes} bytes"))
+            }
+            Err(e) => last_error = Some(e),
+        }
         let _ = std::fs::remove_file(&scratch);
-        bail!("audio request returned HTTP {}", response.status());
     }
 
-    let bytes = response.bytes().await.context("reading audio body")?;
-    if bytes.len() < 16 * 1024 {
-        let _ = std::fs::remove_file(&scratch);
-        bail!("audio response was only {} bytes", bytes.len());
-    }
-
-    std::fs::write(&scratch, &bytes).context("writing cached audio")?;
-    std::fs::rename(&scratch, &dest).context("moving audio into cache")?;
-    Ok(dest)
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("could not fetch audio")))
 }
 
 /// Resolve and cache a track, reusing a known URL when it still works.
@@ -268,7 +326,10 @@ pub async fn resolve_and_fetch(
         result = fetch_audio(&fresh, video_id).await;
     }
 
-    if result.is_err() {
+    if let Err(e) = &result {
+        // Falling back here costs ~8s per track instead of ~1s, so say so:
+        // a silent degradation looks like "resolution is just slow".
+        eprintln!("[cache] ranged fetch failed for {video_id} ({e}); using yt-dlp");
         result = download_track(video_id, auth).await;
     }
 
