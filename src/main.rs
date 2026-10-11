@@ -223,8 +223,10 @@ fn search_cmd(query: &str) -> anyhow::Result<()> {
     println!("{} items (All filter)", items.len());
     for (i, item) in items.iter().enumerate() {
         println!(
-            "  {i:2}  {:?}  {:<44}  {}",
-            item.kind, item.title, item.subtitle
+            "  {i:2}  {:<8}  {:<44}  {}",
+            item.kind.label(),
+            item.title,
+            item.subtitle
         );
     }
     Ok(())

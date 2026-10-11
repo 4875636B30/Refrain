@@ -313,10 +313,12 @@ fn kind_from_page_type(page_type: Option<&str>) -> Option<ItemKind> {
 
 fn kind_from_label(label: &str) -> Option<ItemKind> {
     Some(match label {
+        "Song" => ItemKind::Song,
+        "Video" => ItemKind::Video,
         "Album" | "Single" | "EP" => ItemKind::Album,
         "Artist" => ItemKind::Artist,
         "Playlist" | "Community playlist" => ItemKind::Playlist,
-        "Podcast" => ItemKind::Podcast,
+        "Podcast" | "Episode" | "Episodes" => ItemKind::Podcast,
         "Profile" => ItemKind::Profile,
         _ => return None,
     })

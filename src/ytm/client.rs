@@ -29,15 +29,17 @@ const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firef
 pub enum SearchFilter {
     All,
     Songs,
+    Videos,
     Albums,
     Artists,
     Playlists,
 }
 
 impl SearchFilter {
-    pub const ALL_FILTERS: [SearchFilter; 5] = [
+    pub const ALL_FILTERS: [SearchFilter; 6] = [
         SearchFilter::All,
         SearchFilter::Songs,
+        SearchFilter::Videos,
         SearchFilter::Albums,
         SearchFilter::Artists,
         SearchFilter::Playlists,
@@ -47,16 +49,23 @@ impl SearchFilter {
         match self {
             SearchFilter::All => "All",
             SearchFilter::Songs => "Songs",
+            SearchFilter::Videos => "Videos",
             SearchFilter::Albums => "Albums",
             SearchFilter::Artists => "Artists",
             SearchFilter::Playlists => "Playlists",
         }
     }
 
+    /// Whether this category reads better as rows than as cover tiles.
+    pub fn has_row_layout(self) -> bool {
+        matches!(self, SearchFilter::Songs | SearchFilter::Videos)
+    }
+
     fn param(self) -> Option<&'static str> {
         match self {
             SearchFilter::All => None,
             SearchFilter::Songs => Some("EgWKAQIIAWoSEAUQCRADEAoQBBAQEBUQDhAR"),
+            SearchFilter::Videos => Some("EgWKAQIQAWoSEAUQCRADEAoQBBAQEBUQDhAR"),
             SearchFilter::Albums => Some("EgWKAQIYAWoSEAUQCRADEAoQBBAQEBUQDhAR"),
             SearchFilter::Artists => Some("EgWKAQIgAWoSEAUQCRADEAoQBBAQEBUQDhAR"),
             SearchFilter::Playlists => Some("EgeKAQQoADgBahIQBRAJEAMQChAEEBAQFRAOEBE="),

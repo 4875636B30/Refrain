@@ -62,6 +62,9 @@ pub fn apply_theme(ctx: &egui::Context, light: bool) {
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(10.0, 5.0);
+        // Rows and tiles handle their own clicks; without this, hovering the
+        // text inside shows a text cursor and can swallow the click.
+        style.interaction.selectable_labels = false;
         let radius = egui::CornerRadius::same(6);
         for widget in [
             &mut style.visuals.widgets.inactive,

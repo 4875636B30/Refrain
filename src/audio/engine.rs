@@ -7,6 +7,7 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -21,19 +22,43 @@ pub struct AudioEngine {
     volume: f32,
     pub now_playing: Option<Track>,
     pub total: Option<Duration>,
+    /// Set by the device's error callback (e.g. ALSA `POLLERR`).
+    device_error: Arc<Mutex<Option<String>>>,
 }
 
 impl AudioEngine {
     pub fn new() -> Result<Self> {
-        let device = DeviceSinkBuilder::open_default_sink()
+        let device_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&device_error);
+
+        // Take over the error callback so device failures don't spam the log;
+        // the app polls `take_device_error` and can rebuild the stream.
+        let mut device = DeviceSinkBuilder::from_default_device()
+            .context("finding the default audio output device")?
+            .with_error_callback(move |error| {
+                if let Ok(mut slot) = slot.lock()
+                    && slot.is_none()
+                {
+                    *slot = Some(format!("{error}"));
+                }
+            })
+            .open_stream()
             .context("opening the default audio output device")?;
+        device.log_on_drop(false);
+
         Ok(Self {
             device,
             player: None,
             volume: 0.8,
             now_playing: None,
             total: None,
+            device_error,
         })
+    }
+
+    /// Take a pending output-device error, if any.
+    pub fn take_device_error(&self) -> Option<String> {
+        self.device_error.lock().ok()?.take()
     }
 
     /// Decode `path` and start playing it, replacing any current track.

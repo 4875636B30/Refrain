@@ -24,7 +24,7 @@ use crate::ui;
 use crate::ytm::{Client, Page, SearchFilter, SearchItem, Track};
 
 enum Msg {
-    Search(Result<Vec<SearchItem>, String>),
+    Search(Result<Vec<SearchSection>, String>),
     Page(Result<Page, String>),
     Downloaded {
         video_id: String,
@@ -128,6 +128,59 @@ fn save_play_counts(counts: &HashMap<String, u32>) {
     let _ = std::fs::write(path, text);
 }
 
+/// One category of search results.
+struct SearchSection {
+    filter: SearchFilter,
+    items: Vec<SearchItem>,
+}
+
+/// Run a search: one request for a chosen category, or one per category for
+/// "All", so each section holds genuine top picks for that category.
+async fn search_sections(
+    client: &Client,
+    query: &str,
+    filter: SearchFilter,
+) -> Result<Vec<SearchSection>, String> {
+    if filter != SearchFilter::All {
+        let items = client
+            .search(query, filter)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(vec![SearchSection { filter, items }]);
+    }
+
+    const CATEGORIES: [SearchFilter; 5] = [
+        SearchFilter::Songs,
+        SearchFilter::Videos,
+        SearchFilter::Albums,
+        SearchFilter::Artists,
+        SearchFilter::Playlists,
+    ];
+    let (songs, videos, albums, artists, playlists) = tokio::join!(
+        client.search(query, CATEGORIES[0]),
+        client.search(query, CATEGORIES[1]),
+        client.search(query, CATEGORIES[2]),
+        client.search(query, CATEGORIES[3]),
+        client.search(query, CATEGORIES[4]),
+    );
+
+    let mut sections = Vec::new();
+    for (filter, result) in [
+        (CATEGORIES[0], songs),
+        (CATEGORIES[1], videos),
+        (CATEGORIES[2], albums),
+        (CATEGORIES[3], artists),
+        (CATEGORIES[4], playlists),
+    ] {
+        match result {
+            Ok(items) if !items.is_empty() => sections.push(SearchSection { filter, items }),
+            Err(e) => eprintln!("[search] {} failed: {e}", filter.label()),
+            _ => {}
+        }
+    }
+    Ok(sections)
+}
+
 /// Turn a clicked result/shelf item into an action.
 fn activate(items: &[SearchItem], idx: usize) -> Option<Action> {
     let item = items.get(idx)?;
@@ -157,7 +210,7 @@ fn empty_state(ui: &mut egui::Ui, busy: bool) {
     });
 }
 
-fn nav_button(ui: &mut egui::Ui, current: &mut Nav, value: Nav, label: &str) {
+fn nav_button(ui: &mut egui::Ui, current: &mut Nav, value: Nav, label: &str) -> bool {
     let selected = *current == value;
     let text = RichText::new(label).size(15.0);
     let text = if selected { text.strong() } else { text };
@@ -167,7 +220,9 @@ fn nav_button(ui: &mut egui::Ui, current: &mut Nav, value: Nav, label: &str) {
         .clicked()
     {
         *current = value;
+        return true;
     }
+    false
 }
 
 pub struct App {
@@ -191,7 +246,8 @@ pub struct App {
     theme_light: bool,
     theme_applied: bool,
     view: View,
-    results: Vec<SearchItem>,
+    /// Search results, grouped by category.
+    sections: Vec<SearchSection>,
 
     status: Option<String>,
     busy: bool,
@@ -211,8 +267,10 @@ pub struct App {
     hover_target: Option<(String, Instant)>,
     /// Rounds of continuation loading for the current feed page.
     more_rounds: u32,
-    /// Whether the home feed has been reloaded after sign-in.
-    home_reloaded: bool,
+    /// Visited views, so Back returns where the user came from.
+    view_history: Vec<(Nav, View)>,
+    /// Whether the home feed still needs reloading now that we're signed in.
+    home_needs_reload: bool,
     advance_armed: bool,
 
     audio: Option<AudioEngine>,
@@ -220,6 +278,8 @@ pub struct App {
     volume: f32,
     /// Last non-zero volume, for the mute toggle.
     last_volume: f32,
+    /// When we last rebuilt the audio device, to avoid hot-looping.
+    last_audio_recovery: Option<Instant>,
 
     img_http: reqwest::Client,
     thumbnails: HashMap<String, egui::TextureHandle>,
@@ -323,7 +383,7 @@ impl App {
             theme_light,
             theme_applied: false,
             view: View::Search,
-            results: Vec::new(),
+            sections: Vec::new(),
             status,
             busy: false,
             queue: Vec::new(),
@@ -336,12 +396,14 @@ impl App {
             prefetch_inflight: HashSet::new(),
             hover_target: None,
             more_rounds: 0,
-            home_reloaded: false,
+            view_history: Vec::new(),
+            home_needs_reload: false,
             advance_armed: false,
             audio,
             audio_error,
             volume,
             last_volume: if volume > 0.001 { volume } else { 0.8 },
+            last_audio_recovery: None,
             img_http,
             thumbnails: HashMap::new(),
             thumb_order: VecDeque::new(),
@@ -349,7 +411,7 @@ impl App {
             thumb_failed: HashSet::new(),
         };
         // Open on the home feed rather than a blank search page.
-        app.open_page(&cc.egui_ctx, "FEmusic_home".to_string());
+        app.load_page(&cc.egui_ctx, "FEmusic_home".to_string(), false);
         Ok(app)
     }
 
@@ -368,16 +430,26 @@ impl App {
         let ctx = ctx.clone();
         let filter = self.filter;
         self.rt.spawn(async move {
-            let result = client
-                .search(&query, filter)
-                .await
-                .map_err(|e| e.to_string());
+            let result = search_sections(&client, &query, filter).await;
             let _ = tx.send(Msg::Search(result));
             ctx.request_repaint();
         });
     }
 
-    fn open_page(&mut self, ctx: &egui::Context, browse_id: String) {
+    /// Fetch a detail page. `remember` pushes the current view so Back returns
+    /// to where the user came from rather than always to search.
+    fn load_page(&mut self, ctx: &egui::Context, browse_id: String, remember: bool) {
+        if remember {
+            let current = std::mem::replace(&mut self.view, View::Search);
+            if matches!(&current, View::Detail(page) if page.browse_id == browse_id) {
+                self.view = current; // don't stack duplicates
+            } else {
+                self.view_history.push((self.nav, current));
+                if self.view_history.len() > 32 {
+                    self.view_history.remove(0);
+                }
+            }
+        }
         self.busy = true;
         self.status = Some("Loading…".to_string());
         let client = self.client.clone();
@@ -388,6 +460,10 @@ impl App {
             let _ = tx.send(Msg::Page(result));
             ctx.request_repaint();
         });
+    }
+
+    fn open_page(&mut self, ctx: &egui::Context, browse_id: String) {
+        self.load_page(ctx, browse_id, true);
     }
 
     /// Queue stream-URL resolution for tracks the user is likely to click, so
@@ -659,19 +735,83 @@ impl App {
         }
     }
 
+    /// The output device can fail mid-playback — `alsa::poll()` returning
+    /// `POLLERR`, a USB device unplugged, suspend/resume. Rather than leaving
+    /// playback dead (and the log spammed), rebuild the stream and resume.
+    fn handle_audio_errors(&mut self, ctx: &egui::Context) {
+        let Some(error) = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.take_device_error())
+        else {
+            return;
+        };
+        eprintln!("[audio] output device error: {error}");
+
+        if let Some(last) = self.last_audio_recovery
+            && last.elapsed() < Duration::from_secs(5)
+        {
+            return; // don't hammer reconnection
+        }
+        self.last_audio_recovery = Some(Instant::now());
+
+        let resume = self.audio.as_ref().and_then(|audio| {
+            audio
+                .now_playing
+                .clone()
+                .map(|track| (track, audio.position()))
+        });
+        let volume = self.volume;
+
+        match AudioEngine::new() {
+            Ok(mut fresh) => {
+                fresh.set_volume(volume);
+                self.audio = Some(fresh);
+                self.status = Some("Audio device restarted".to_string());
+                if let Some((track, position)) = resume {
+                    let path = resolver::cache_path(&track.video_id);
+                    if path.exists() {
+                        // Resume the cached file where we left off.
+                        if let Some(audio) = self.audio.as_mut() {
+                            let _ = audio.play_file(&path, track.clone());
+                            audio.seek(position);
+                        }
+                        self.queue = vec![track];
+                        self.current = Some(0);
+                        self.advance_armed = true;
+                    } else {
+                        // A stream can't be resumed, so start it again.
+                        self.queue = vec![track];
+                        self.play_index(ctx, 0);
+                    }
+                }
+            }
+            Err(e) => {
+                self.audio = None;
+                self.audio_error = Some(format!("Audio output unavailable: {e}"));
+                self.status = Some(format!("Audio device lost: {e}"));
+            }
+        }
+    }
+
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Search(Ok(items)) => {
-                    self.results = items;
+                Msg::Search(Ok(sections)) => {
+                    self.sections = sections;
                     self.busy = false;
                     self.status = None;
                     self.view = View::Search;
                     self.nav = Nav::Search;
+                    // Warm the first couple of song results.
                     let warm: Vec<Track> = self
-                        .results
+                        .sections
                         .iter()
-                        .filter_map(|item| item.to_track())
+                        .find(|section| section.filter.has_row_layout())
+                        .map(|section| section.items.as_slice())
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter_map(SearchItem::to_track)
                         .take(2)
                         .collect();
                     for track in &warm {
@@ -683,6 +823,7 @@ impl App {
                     self.status = Some(format!("Search failed: {e}"));
                 }
                 Msg::Page(Ok(page)) => {
+                    let is_home = page.browse_id == "FEmusic_home";
                     self.queue = page.tracks.clone();
                     self.current = None;
                     self.advance_armed = false;
@@ -705,6 +846,12 @@ impl App {
                     if let Some(token) = next {
                         self.more_rounds = 1;
                         self.spawn_more_shelves(ctx, browse_id, token);
+                    }
+                    // The startup feed is anonymous; swap in the personalized
+                    // one now that sign-in has completed.
+                    if is_home && self.authenticated && self.home_needs_reload {
+                        self.home_needs_reload = false;
+                        self.load_page(ctx, "FEmusic_home".to_string(), false);
                     }
                 }
                 Msg::Page(Err(e)) => {
@@ -771,14 +918,12 @@ impl App {
                         }
                         Err(e) => self.status = Some(format!("Cookie import failed: {e}")),
                     }
-                    // Reload the home feed now that we're signed in, so the
-                    // recommendations match the account.
-                    if !self.home_reloaded
-                        && let View::Detail(page) = &self.view
-                        && page.browse_id == "FEmusic_home"
+                    // The home feed is personalized, so mark it for a reload.
+                    self.home_needs_reload = true;
+                    if matches!(&self.view, View::Detail(page) if page.browse_id == "FEmusic_home")
                     {
-                        self.home_reloaded = true;
-                        self.open_page(ctx, "FEmusic_home".to_string());
+                        self.home_needs_reload = false;
+                        self.load_page(ctx, "FEmusic_home".to_string(), false);
                     }
                     // Repeat the last search: anonymous ranking differs a lot
                     // from signed-in ranking (the top result changes).
@@ -928,8 +1073,10 @@ impl App {
                     uris.push(uri.clone());
                 }
             };
-            for item in &self.results {
-                push(&item.thumbnail);
+            for section in &self.sections {
+                for item in &section.items {
+                    push(&item.thumbnail);
+                }
             }
             if let View::Detail(page) = &self.view {
                 for track in &page.tracks {
@@ -981,6 +1128,7 @@ impl App {
     /// Left navigation rail.
     fn sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut nav = self.nav;
+        let mut activated: Option<Nav> = None;
         egui::Panel::left("sidebar")
             .resizable(false)
             .exact_size(176.0)
@@ -991,9 +1139,15 @@ impl App {
                     ui.label(RichText::new("♪  YouTube Music").size(15.0).strong());
                 });
                 ui.add_space(12.0);
-                nav_button(ui, &mut nav, Nav::Home, "🏠   Home");
-                nav_button(ui, &mut nav, Nav::Search, "🔍   Search");
-                nav_button(ui, &mut nav, Nav::Library, "📚   Library");
+                if nav_button(ui, &mut nav, Nav::Home, "🏠   Home") {
+                    activated = Some(Nav::Home);
+                }
+                if nav_button(ui, &mut nav, Nav::Search, "🔍   Search") {
+                    activated = Some(Nav::Search);
+                }
+                if nav_button(ui, &mut nav, Nav::Library, "📚   Library") {
+                    activated = Some(Nav::Library);
+                }
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(8.0);
@@ -1017,12 +1171,16 @@ impl App {
                 });
             });
 
-        if nav != self.nav {
-            self.nav = nav;
-            match nav {
-                Nav::Home => self.open_page(ctx, "FEmusic_home".to_string()),
+        // Clicking the current section still refreshes it — the home feed's
+        // "Quick picks" change on every request.
+        if let Some(target) = activated {
+            self.nav = target;
+            match target {
+                Nav::Home => self.load_page(ctx, "FEmusic_home".to_string(), true),
                 Nav::Search => self.view = View::Search,
-                Nav::Library => self.open_page(ctx, "FEmusic_library_landing".to_string()),
+                Nav::Library => {
+                    self.load_page(ctx, "FEmusic_library_landing".to_string(), true);
+                }
             }
         }
     }
@@ -1031,6 +1189,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut do_search = false;
         let mut go_back = false;
+        let mut filter_changed = false;
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1040,7 +1199,7 @@ impl App {
                 // edges get the same padding.
                 let total = ui.available_width();
                 let left_width = 104.0;
-                let right_width = 48.0;
+                let right_width = 92.0;
                 let centre_width = (total - left_width - right_width).max(240.0);
 
                 ui.allocate_ui_with_layout(
@@ -1070,14 +1229,19 @@ impl App {
                             do_search = true;
                         }
                         ui.add_space(6.0);
+                        let mut chosen = self.filter;
                         egui::ComboBox::from_id_salt("search_filter")
                             .width(132.0)
                             .selected_text(self.filter.label())
                             .show_ui(ui, |ui| {
                                 for option in SearchFilter::ALL_FILTERS {
-                                    ui.selectable_value(&mut self.filter, option, option.label());
+                                    ui.selectable_value(&mut chosen, option, option.label());
                                 }
                             });
+                        if chosen != self.filter {
+                            self.filter = chosen;
+                            filter_changed = true;
+                        }
                         if ui.button("Search").clicked() {
                             do_search = true;
                         }
@@ -1089,6 +1253,9 @@ impl App {
                     Layout::right_to_left(Align::Center),
                     |ui| {
                         ui.add_space(10.0);
+                        // In a right-to-left layout the first widget is the
+                        // rightmost, so the gear is placed first and the spinner
+                        // sits to its left with a gap between them.
                         ui.menu_button("⚙", |ui| {
                             let theme_label = if self.theme_light {
                                 "☾  Dark theme"
@@ -1113,6 +1280,7 @@ impl App {
                             );
                         });
                         if self.busy {
+                            ui.add_space(6.0);
                             ui.spinner();
                         }
                     },
@@ -1122,11 +1290,23 @@ impl App {
         });
 
         if go_back {
-            self.nav = Nav::Search;
-            self.view = View::Search;
+            match self.view_history.pop() {
+                Some((nav, view)) => {
+                    self.nav = nav;
+                    self.view = view;
+                }
+                None => {
+                    self.nav = Nav::Search;
+                    self.view = View::Search;
+                }
+            }
         }
         if do_search {
             self.nav = Nav::Search;
+            self.run_search(ctx);
+        }
+        if filter_changed {
+            // Changing category re-runs the search for that category.
             self.run_search(ctx);
         }
     }
@@ -1141,6 +1321,7 @@ impl App {
     fn central(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut action: Option<Action> = None;
         let mut hovered: Option<Track> = None;
+        let mut see_more: Option<SearchFilter> = None;
         let view = std::mem::replace(&mut self.view, View::Search);
         let current_video = self
             .current
@@ -1151,9 +1332,13 @@ impl App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match &view {
-                    View::Search => {
-                        self.results_view(ui, &current_video, &mut action, &mut hovered)
-                    }
+                    View::Search => self.results_view(
+                        ui,
+                        &current_video,
+                        &mut action,
+                        &mut hovered,
+                        &mut see_more,
+                    ),
                     View::Detail(page) => {
                         self.detail_view(ui, page, &current_video, &mut action, &mut hovered)
                     }
@@ -1161,6 +1346,13 @@ impl App {
         });
 
         self.view = view;
+        // "See more" expands a category — its results are already loaded.
+        if let Some(filter) = see_more {
+            self.filter = filter;
+            if !self.sections.iter().any(|section| section.filter == filter) {
+                self.run_search(ctx);
+            }
+        }
         self.hover_prefetch(ctx, hovered);
         if let Some(action) = action {
             self.handle_action(ctx, action);
@@ -1173,44 +1365,99 @@ impl App {
         current_video: &Option<String>,
         action: &mut Option<Action>,
         hovered: &mut Option<Track>,
+        see_more: &mut Option<SearchFilter>,
     ) {
-        if self.results.is_empty() {
+        if self.sections.is_empty() {
             empty_state(ui, self.busy);
             return;
         }
-        // Songs read better as rows; everything else is cover art.
-        if self.filter == SearchFilter::Songs {
-            for (idx, item) in self.results.iter().enumerate() {
-                let selected = item.video_id.as_deref() == current_video.as_deref();
-                let trailing = item.duration_secs.map(crate::ytm::domain::fmt_duration);
-                let row = ui::list_row(
-                    ui,
-                    &self.thumbnails,
-                    ("search", idx),
-                    item.thumbnail.as_deref(),
-                    &item.title,
-                    &item.subtitle,
-                    trailing.as_deref(),
-                    Some(idx),
-                    selected,
-                    item.playable(),
-                    item.navigable(),
-                );
-                if row.hovered() {
-                    *hovered = item.to_track();
-                }
-                if row.clicked() {
-                    *action = activate(&self.results, idx);
-                }
+
+        // A chosen category shows everything it returned; "All" previews each.
+        let expanded = self.filter != SearchFilter::All;
+        const PREVIEW: usize = 6;
+
+        // Taken out so rendering can borrow `self` mutably.
+        let sections = std::mem::take(&mut self.sections);
+        for section in &sections {
+            let items: Vec<SearchItem> = if expanded {
+                section.items.clone()
+            } else {
+                section.items.iter().take(PREVIEW).cloned().collect()
+            };
+            if items.is_empty() {
+                continue;
             }
-        } else if let Some(idx) = ui::cover_grid(
-            ui,
-            &self.thumbnails,
-            &self.results,
-            196.0,
-            current_video.as_deref(),
-        ) {
-            *action = activate(&self.results, idx);
+
+            if !expanded {
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(section.filter.label()).size(18.0).strong());
+                    if section.items.len() > PREVIEW {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("See more").clicked() {
+                                *see_more = Some(section.filter);
+                            }
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+            }
+
+            if section.filter.has_row_layout() {
+                self.render_rows(
+                    ui,
+                    section.filter.label(),
+                    &items,
+                    current_video,
+                    action,
+                    hovered,
+                );
+            } else if let Some(idx) = ui::cover_grid(
+                ui,
+                &self.thumbnails,
+                &items,
+                196.0,
+                current_video.as_deref(),
+            ) {
+                *action = activate(&items, idx);
+            }
+        }
+        self.sections = sections;
+    }
+
+    /// Rows for a list of songs/videos: hover warms a stream, clicking plays
+    /// within the list so next/prev walk it.
+    fn render_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        id_prefix: &str,
+        items: &[SearchItem],
+        current_video: &Option<String>,
+        action: &mut Option<Action>,
+        hovered: &mut Option<Track>,
+    ) {
+        for (idx, item) in items.iter().enumerate() {
+            let selected = item.video_id.as_deref() == current_video.as_deref();
+            let trailing = item.duration_secs.map(crate::ytm::domain::fmt_duration);
+            let row = ui::list_row(
+                ui,
+                &self.thumbnails,
+                (id_prefix, idx),
+                item.thumbnail.as_deref(),
+                &item.title,
+                &item.subtitle,
+                trailing.as_deref(),
+                Some(idx),
+                selected,
+                item.playable(),
+                item.navigable(),
+            );
+            if row.hovered() {
+                *hovered = item.to_track();
+            }
+            if row.clicked() {
+                *action = activate(items, idx);
+            }
         }
     }
 
@@ -1445,6 +1692,7 @@ impl eframe::App for App {
         }
 
         self.drain_messages(&ctx);
+        self.handle_audio_errors(&ctx);
         self.ensure_thumbnails(&ctx);
         self.tick_playback(&ctx);
         self.sidebar(ui, &ctx);

@@ -78,6 +78,7 @@ pub struct Page {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
     Song,
+    Video,
     Album,
     Artist,
     Playlist,
@@ -87,10 +88,10 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             ItemKind::Song => "Song",
+            ItemKind::Video => "Video",
             ItemKind::Album => "Album",
             ItemKind::Artist => "Artist",
             ItemKind::Playlist => "Playlist",
