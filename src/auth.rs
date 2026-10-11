@@ -12,13 +12,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha1::{Digest, Sha1};
 use tokio::process::Command;
 
-use crate::config::{
-    self, AuthConfig, AuthMode, Config,
-};
+use crate::config::{self, AuthConfig, AuthMode, Config};
 
 /// A single HTTP cookie.
 #[derive(Clone, Debug)]
@@ -90,7 +88,11 @@ impl CookieJar {
             .as_secs();
         let mut hasher = Sha1::new();
         hasher.update(format!("{ts} {sapisid} {origin}").as_bytes());
-        let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         Some(format!("SAPISIDHASH {ts}_{hex}"))
     }
 
@@ -369,11 +371,11 @@ async fn resolve_uncached(config: &Config) -> Result<Option<ResolvedAuth>> {
         }
         AuthMode::Browser => {
             let configured = try_source(&config.auth).await;
-            if let Some(found) = &configured {
-                if found.jar.has_youtube_session() {
-                    store_source(&found.source);
-                    return Ok(configured);
-                }
+            if let Some(found) = &configured
+                && found.jar.has_youtube_session()
+            {
+                store_source(&found.source);
+                return Ok(configured);
             }
             match auto_resolve().await? {
                 Some(better) => Ok(Some(better)),
@@ -458,7 +460,10 @@ fn candidates() -> Vec<(String, PathBuf)> {
 
     // Chromium family: value is the user-data directory.
     let chromium = [
-        ("brave", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
+        (
+            "brave",
+            ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+        ),
         ("brave", ".config/BraveSoftware/Brave-Browser"),
         ("chrome", ".var/app/com.google.Chrome/config/google-chrome"),
         ("chrome", ".config/google-chrome"),

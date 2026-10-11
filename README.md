@@ -61,9 +61,12 @@ intermittent HTTP 403s.
 
 - The stream is mirrored into `~/.cache/youtube-music-rs/audio/<video_id>.m4a`,
   so repeats play straight from disk.
-- Streams are opened **ahead of time** — when a page or search loads, and after
-  hovering a track for ~250 ms — so pressing play starts in milliseconds instead
-  of waiting on yt-dlp. The next track in the queue is warmed the same way.
+- Streams are opened **ahead of time** — when a page or search loads, after
+  hovering a track for ~150 ms, and for the next track in the queue — so
+  pressing play starts in milliseconds instead of waiting on yt-dlp.
+- The two tracks you play most are warmed at startup. Ranking comes from local
+  play counts (`~/.config/youtube-music-rs/plays.tsv`); with none recorded yet,
+  your YouTube Music history is used, most recent first.
 - If no `m4a` stream is offered, playback falls back to the download path, where
   ffmpeg transcodes.
 
@@ -71,6 +74,30 @@ The one unavoidable cost is the first `yt-dlp` extraction for a track (roughly
 6 s: ~1.6 s webpage, ~2 s solving YouTube's JS challenges, ~1.5 s startup).
 That work is moved off the critical path by prefetching, so it only shows up if
 you click a track you never hovered and whose page never warmed it.
+
+Fetching the stream ourselves is not an option: every InnerTube client that can
+play returns `signatureCipher` URLs, so it would mean reimplementing YouTube's
+JS signature deciphering — the part yt-dlp exists to maintain.
+
+### Memory
+
+- Artwork is decoded to at most 160 px and cached with a bounded (320-entry)
+  LRU, so browsing large feeds doesn't grow memory without limit.
+- Streams are read from `yt-dlp`'s stdout into memory as needed, and at most two
+  are held open for prefetching.
+
+### Packaging
+
+The binary looks for `yt-dlp` in this order, which makes a self-contained
+distribution possible:
+
+1. `$YTDLP_PATH`
+2. **next to the executable** (ship `yt-dlp_linux` beside the binary)
+3. `~/.local/bin/yt-dlp`
+4. anywhere on `$PATH`
+
+A release bundle is therefore the binary plus `yt-dlp_linux`, plus `ffmpeg`
+(needed only for the download fallback).
 
 ### UI
 

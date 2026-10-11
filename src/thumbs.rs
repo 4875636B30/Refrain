@@ -6,9 +6,9 @@
 
 use anyhow::Result;
 
-/// Longest edge we keep after decoding. The API offers up to 544px, which is
-/// wasteful for list rows of ~40px.
-const MAX_EDGE: u32 = 256;
+/// Longest edge we keep after decoding. Artwork is shown at ≤64px in lists and
+/// ≤160px in headers, so decoding larger only wastes memory.
+const MAX_EDGE: u32 = 160;
 
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
@@ -40,7 +40,10 @@ pub fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
     };
     let image = image.to_rgba8();
     let size = [image.width() as usize, image.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        image.as_raw(),
+    ))
 }
 
 #[cfg(test)]

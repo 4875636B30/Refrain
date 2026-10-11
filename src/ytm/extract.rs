@@ -168,7 +168,11 @@ fn runs_of(text_node: &Value) -> Vec<Run> {
                 .map(endpoint_ids)
                 .unwrap_or((None, None, None));
             out.push(Run {
-                text: r.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                text: r
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 page_type,
                 watch_id,
             });
@@ -479,10 +483,10 @@ fn collect_tracks(v: &Value, out: &mut Vec<Track>) {
                 if key == "musicCarouselShelfRenderer" {
                     continue;
                 }
-                if key == "musicResponsiveListItemRenderer" {
-                    if let Some(track) = parse_track(value) {
-                        out.push(track);
-                    }
+                if key == "musicResponsiveListItemRenderer"
+                    && let Some(track) = parse_track(value)
+                {
+                    out.push(track);
                 }
                 collect_tracks(value, out);
             }
@@ -549,9 +553,7 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         "musicImmersiveHeaderRenderer",
         "musicDetailHeaderRenderer",
     ];
-    let header = HEADER_NAMES
-        .iter()
-        .find_map(|name| find_first(v, name));
+    let header = HEADER_NAMES.iter().find_map(|name| find_first(v, name));
 
     let mut title = String::new();
     let mut subtitle = String::new();
@@ -584,10 +586,11 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
     // Album rows often omit the artist (implied) and the artwork, so fill the
     // gaps from the header instead of showing "Unknown artist" and blanks.
     for track in &mut tracks {
-        if track.artists.is_empty() && kind == PageKind::Album {
-            if let Some(artist) = &header_artist {
-                track.artists = vec![artist.clone()];
-            }
+        if track.artists.is_empty()
+            && kind == PageKind::Album
+            && let Some(artist) = &header_artist
+        {
+            track.artists = vec![artist.clone()];
         }
         if track.thumbnail.is_none() {
             track.thumbnail = thumbnail.clone();

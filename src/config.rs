@@ -61,24 +61,24 @@ impl Config {
         if self.auth.configured() {
             return;
         }
-        if let Ok(file) = std::env::var("YTDLP_COOKIES") {
-            if !file.trim().is_empty() {
-                self.auth.mode = AuthMode::File;
-                self.auth.cookies_file = file;
-                return;
-            }
+        if let Ok(file) = std::env::var("YTDLP_COOKIES")
+            && !file.trim().is_empty()
+        {
+            self.auth.mode = AuthMode::File;
+            self.auth.cookies_file = file;
+            return;
         }
-        if let Ok(browser) = std::env::var("YTDLP_COOKIES_FROM_BROWSER") {
-            if !browser.trim().is_empty() {
-                self.auth.mode = AuthMode::Browser;
-                // Allow `browser+keyring:profile` syntax straight from the env var.
-                let spec = browser.trim().to_string();
-                let (browser, rest) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-                let (browser, keyring) = browser.split_once('+').unwrap_or((browser, ""));
-                self.auth.browser = browser.to_string();
-                self.auth.keyring = keyring.to_string();
-                self.auth.profile = rest.to_string();
-            }
+        if let Ok(browser) = std::env::var("YTDLP_COOKIES_FROM_BROWSER")
+            && !browser.trim().is_empty()
+        {
+            self.auth.mode = AuthMode::Browser;
+            // Allow `browser+keyring:profile` syntax straight from the env var.
+            let spec = browser.trim().to_string();
+            let (browser, rest) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            let (browser, keyring) = browser.split_once('+').unwrap_or((browser, ""));
+            self.auth.browser = browser.to_string();
+            self.auth.keyring = keyring.to_string();
+            self.auth.profile = rest.to_string();
         }
     }
 }

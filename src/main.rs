@@ -186,8 +186,7 @@ fn auth_check() -> anyhow::Result<()> {
 
     println!(
         "\nchosen source: {} {}",
-        resolved.source.browser,
-        resolved.source.profile
+        resolved.source.browser, resolved.source.profile
     );
     println!(
         "cookies     : {} total | SAPISID: {} | YouTube session (LOGIN_INFO): {}",
@@ -213,7 +212,11 @@ fn search_cmd(query: &str) -> anyhow::Result<()> {
 
     let cfg = config::Config::load();
     let rt = tokio::runtime::Runtime::new()?;
-    let jar = rt.block_on(auth::resolve(&cfg)).ok().flatten().map(|r| r.jar);
+    let jar = rt
+        .block_on(auth::resolve(&cfg))
+        .ok()
+        .flatten()
+        .map(|r| r.jar);
     let client = ytm::Client::new("en", "US", jar)?;
 
     let items = rt.block_on(client.search(query, SearchFilter::All))?;
@@ -373,7 +376,11 @@ fn thumb_cmd(url: &str) -> anyhow::Result<()> {
 fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let cfg = config::Config::load();
-    let jar = rt.block_on(auth::resolve(&cfg)).ok().flatten().map(|r| r.jar);
+    let jar = rt
+        .block_on(auth::resolve(&cfg))
+        .ok()
+        .flatten()
+        .map(|r| r.jar);
     let client = ytm::Client::new("en", "US", jar)?;
     let page = rt.block_on(client.browse(browse_id))?;
 
@@ -417,8 +424,8 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
 }
 
 fn download_cmd(video_id: &str) -> anyhow::Result<()> {
-    use std::io::BufReader;
     use rodio::Source as _;
+    use std::io::BufReader;
 
     let cfg = config::Config::load();
     let rt = tokio::runtime::Runtime::new()?;
@@ -449,7 +456,11 @@ fn probe(query: &str) -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     let cfg = config::Config::load();
-    let jar = rt.block_on(auth::resolve(&cfg)).ok().flatten().map(|r| r.jar);
+    let jar = rt
+        .block_on(auth::resolve(&cfg))
+        .ok()
+        .flatten()
+        .map(|r| r.jar);
     let client = Client::new("en", "US", jar)?;
 
     println!("== search({query:?}) [Songs] ==");
@@ -490,4 +501,3 @@ fn probe(query: &str) -> anyhow::Result<()> {
 
     Ok(())
 }
-

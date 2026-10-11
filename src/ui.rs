@@ -160,11 +160,12 @@ pub fn progress_bar(ui: &mut egui::Ui, pos: f32, total: f32) -> Option<f32> {
             .circle_filled(egui::pos2(handle_x, track.center().y), 6.0, ACCENT);
     }
 
-    if total > 0.0 && (response.dragged() || response.clicked()) {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let fraction = ((pointer.x - track.left()) / width).clamp(0.0, 1.0);
-            return Some(fraction * total);
-        }
+    if total > 0.0
+        && (response.dragged() || response.clicked())
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let fraction = ((pointer.x - track.left()) / width).clamp(0.0, 1.0);
+        return Some(fraction * total);
     }
     None
 }
@@ -214,12 +215,14 @@ pub fn list_row(
     navigable: bool,
 ) -> egui::Response {
     let width = ui.available_width();
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::click());
     let hovered = response.hovered();
     if selected {
-        ui.painter()
-            .rect_filled(rect, 6.0, ui.visuals().selection.bg_fill.gamma_multiply(0.35));
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            ui.visuals().selection.bg_fill.gamma_multiply(0.35),
+        );
     } else if hovered {
         ui.painter()
             .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
@@ -290,8 +293,7 @@ fn cover_tile(
     // Square art plus one line each for title and subtitle. A fixed height keeps
     // rows aligned however long the text is.
     let height = art + 46.0;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let hovered = response.hovered();
     if selected {
         ui.painter().rect_filled(
@@ -312,7 +314,13 @@ fn cover_tile(
             .layout(Layout::top_down(Align::Min)),
         |ui| {
             ui.set_max_width(art);
-            draw_thumbnail(ui, item.thumbnail.as_deref(), thumbs, egui::vec2(art, art), 7.0);
+            draw_thumbnail(
+                ui,
+                item.thumbnail.as_deref(),
+                thumbs,
+                egui::vec2(art, art),
+                7.0,
+            );
             ui.add_space(6.0);
             ui.add(egui::Label::new(RichText::new(&item.title).strong()).truncate());
             if !item.subtitle.is_empty() {

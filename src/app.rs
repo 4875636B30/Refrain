@@ -7,21 +7,21 @@
 //! root `Ui` is handed to us, and panels are added to it with
 //! `egui::Panel::top(...)` / `egui::CentralPanel`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use egui::{Align, Layout, RichText};
 
-use crate::audio::{resolver, AudioEngine};
+use crate::audio::{AudioEngine, resolver};
 use crate::auth::ResolvedAuth;
 use crate::config::{AuthConfig, AuthMode, Config};
-use crate::ytm::{Client, Page, SearchFilter, SearchItem, Track};
 use crate::thumbs;
 use crate::ui;
+use crate::ytm::{Client, Page, SearchFilter, SearchItem, Track};
 
 enum Msg {
     Search(Result<Vec<SearchItem>, String>),
@@ -46,6 +46,8 @@ enum Msg {
         browse_id: String,
         result: Result<crate::ytm::client::MoreShelves, String>,
     },
+    /// The account's listening history, used to warm likely tracks.
+    History(Result<Vec<Track>, String>),
     Image {
         uri: String,
         result: Result<egui::ColorImage, String>,
@@ -58,6 +60,10 @@ const MAX_THUMB_INFLIGHT: usize = 6;
 
 /// How many times we page in more shelves for a feed (home/explore/library).
 const MAX_MORE_ROUNDS: u32 = 5;
+
+/// Artwork textures kept in memory (~160x160 px each). Feeds list many covers,
+/// so this bounds growth as the user browses.
+const MAX_THUMBS: usize = 200;
 
 /// Artwork is fetched with reqwest (the same stack used for the API) and
 /// uploaded as a texture, rather than relying on egui's built-in HTTP loader.
@@ -74,7 +80,10 @@ enum Action {
     Open(String),
     PlayQueueIndex(usize),
     /// Play within a surrounding list so next/prev move through it.
-    PlayList { tracks: Vec<Track>, index: usize },
+    PlayList {
+        tracks: Vec<Track>,
+        index: usize,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -88,6 +97,35 @@ enum Nav {
 struct PrefetchedStream {
     video_id: String,
     decoder: rodio::Decoder<crate::audio::stream::RemoteSource>,
+}
+
+/// Where per-track play counts live.
+fn play_counts_path() -> PathBuf {
+    crate::config::config_dir().join("plays.tsv")
+}
+
+fn load_play_counts() -> HashMap<String, u32> {
+    let Ok(text) = std::fs::read_to_string(play_counts_path()) else {
+        return HashMap::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let (video_id, count) = line.split_once('\t')?;
+            Some((video_id.to_string(), count.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+fn save_play_counts(counts: &HashMap<String, u32>) {
+    let path = play_counts_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let text: String = counts
+        .iter()
+        .map(|(video_id, count)| format!("{video_id}\t{count}\n"))
+        .collect();
+    let _ = std::fs::write(path, text);
 }
 
 /// Turn a clicked result/shelf item into an action.
@@ -164,6 +202,10 @@ pub struct App {
     downloading: HashSet<String>,
     /// Streams opened ahead of the click (most recent last).
     prefetched: Vec<PrefetchedStream>,
+    /// How often each track has been played here, so favourites get warmed.
+    play_counts: HashMap<String, u32>,
+    /// The account's listening history (most recent first).
+    history: Vec<Track>,
     prefetch_inflight: HashSet<String>,
     /// Debounce state for hover-triggered prefetching.
     hover_target: Option<(String, Instant)>,
@@ -181,6 +223,8 @@ pub struct App {
 
     img_http: reqwest::Client,
     thumbnails: HashMap<String, egui::TextureHandle>,
+    /// Insertion order of `thumbnails`, for eviction.
+    thumb_order: VecDeque<String>,
     thumb_inflight: HashSet<String>,
     thumb_failed: HashSet<String>,
 }
@@ -287,6 +331,8 @@ impl App {
             pending_play: None,
             downloading: HashSet::new(),
             prefetched: Vec::new(),
+            play_counts: load_play_counts(),
+            history: Vec::new(),
             prefetch_inflight: HashSet::new(),
             hover_target: None,
             more_rounds: 0,
@@ -298,6 +344,7 @@ impl App {
             last_volume: if volume > 0.001 { volume } else { 0.8 },
             img_http,
             thumbnails: HashMap::new(),
+            thumb_order: VecDeque::new(),
             thumb_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
         };
@@ -321,7 +368,10 @@ impl App {
         let ctx = ctx.clone();
         let filter = self.filter;
         self.rt.spawn(async move {
-            let result = client.search(&query, filter).await.map_err(|e| e.to_string());
+            let result = client
+                .search(&query, filter)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(Msg::Search(result));
             ctx.request_repaint();
         });
@@ -349,13 +399,18 @@ impl App {
         track: Track,
     ) {
         self.pending_play = None;
-        match self.audio.as_mut() {
+        let video_id = track.video_id.clone();
+        let started = match self.audio.as_mut() {
             Some(audio) => match audio.play_decoder(decoder, track) {
                 Ok(()) => {
                     self.status = None;
                     self.advance_armed = true;
+                    true
                 }
-                Err(e) => self.status = Some(format!("Playback failed: {e}")),
+                Err(e) => {
+                    self.status = Some(format!("Playback failed: {e}"));
+                    false
+                }
             },
             None => {
                 self.status = Some(
@@ -363,7 +418,42 @@ impl App {
                         .clone()
                         .unwrap_or_else(|| "Audio output unavailable".to_string()),
                 );
+                false
             }
+        };
+        if started {
+            self.note_play(&video_id);
+        }
+    }
+
+    /// Record a play so favourites can be warmed on the next launch.
+    fn note_play(&mut self, video_id: &str) {
+        *self.play_counts.entry(video_id.to_string()).or_insert(0) += 1;
+        save_play_counts(&self.play_counts);
+    }
+
+    fn spawn_history(&mut self, ctx: &egui::Context) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client.history().await.map_err(|e| e.to_string());
+            let _ = tx.send(Msg::History(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Warm the tracks this account plays most.
+    ///
+    /// Local play counts decide the order; with none recorded yet the history
+    /// order (most recent first) is used, which is a good guess anyway.
+    fn prefetch_favorites(&mut self, ctx: &egui::Context) {
+        let mut ranked = self.history.clone();
+        ranked.sort_by_key(|track| {
+            std::cmp::Reverse(self.play_counts.get(&track.video_id).copied().unwrap_or(0))
+        });
+        for track in ranked.iter().take(2) {
+            self.prefetch(ctx, track);
         }
     }
 
@@ -519,20 +609,30 @@ impl App {
     }
 
     fn play_path(&mut self, path: &Path, track: Track) {
-        let Some(audio) = self.audio.as_mut() else {
-            self.status = Some(
-                self.audio_error
-                    .clone()
-                    .unwrap_or_else(|| "Audio output unavailable".to_string()),
-            );
-            return;
-        };
-        match audio.play_file(path, track) {
-            Ok(()) => {
-                self.status = None;
-                self.advance_armed = true;
+        let video_id = track.video_id.clone();
+        let started = match self.audio.as_mut() {
+            Some(audio) => match audio.play_file(path, track) {
+                Ok(()) => {
+                    self.status = None;
+                    self.advance_armed = true;
+                    true
+                }
+                Err(e) => {
+                    self.status = Some(format!("Playback failed: {e}"));
+                    false
+                }
+            },
+            None => {
+                self.status = Some(
+                    self.audio_error
+                        .clone()
+                        .unwrap_or_else(|| "Audio output unavailable".to_string()),
+                );
+                false
             }
-            Err(e) => self.status = Some(format!("Playback failed: {e}")),
+        };
+        if started {
+            self.note_play(&video_id);
         }
     }
 
@@ -620,10 +720,8 @@ impl App {
                         .unwrap_or(false);
                     match result {
                         Ok(path) => {
-                            if is_pending {
-                                if let Some(track) = self.pending_play.take() {
-                                    self.play_path(&path, track);
-                                }
+                            if is_pending && let Some(track) = self.pending_play.take() {
+                                self.play_path(&path, track);
                             }
                         }
                         Err(e) => {
@@ -675,22 +773,26 @@ impl App {
                     }
                     // Reload the home feed now that we're signed in, so the
                     // recommendations match the account.
-                    if !self.home_reloaded {
-                        if let View::Detail(page) = &self.view {
-                            if page.browse_id == "FEmusic_home" {
-                                self.home_reloaded = true;
-                                self.open_page(ctx, "FEmusic_home".to_string());
-                            }
-                        }
+                    if !self.home_reloaded
+                        && let View::Detail(page) = &self.view
+                        && page.browse_id == "FEmusic_home"
+                    {
+                        self.home_reloaded = true;
+                        self.open_page(ctx, "FEmusic_home".to_string());
                     }
                     // Repeat the last search: anonymous ranking differs a lot
                     // from signed-in ranking (the top result changes).
-                    if self.authenticated && matches!(self.view, View::Search) {
-                        if let Some((query, filter)) = self.last_search.clone() {
-                            self.query = query;
-                            self.filter = filter;
-                            self.run_search(ctx);
-                        }
+                    if self.authenticated
+                        && matches!(self.view, View::Search)
+                        && let Some((query, filter)) = self.last_search.clone()
+                    {
+                        self.query = query;
+                        self.filter = filter;
+                        self.run_search(ctx);
+                    }
+                    // Pull the listening history so favourites can be warmed.
+                    if self.authenticated {
+                        self.spawn_history(ctx);
                     }
                     // Play whatever the user asked for before sign-in finished.
                     if let Some(idx) = self.deferred_play.take() {
@@ -741,9 +843,8 @@ impl App {
                         }
                         Err(e) => {
                             if is_pending {
-                                self.status = Some(format!(
-                                    "Streaming unavailable ({e}) — downloading…"
-                                ));
+                                self.status =
+                                    Some(format!("Streaming unavailable ({e}) — downloading…"));
                                 self.spawn_download(ctx, track.video_id);
                             }
                         }
@@ -751,21 +852,27 @@ impl App {
                 }
                 Msg::MoreShelves { browse_id, result } => {
                     let mut next: Option<String> = None;
-                    if let View::Detail(page) = &mut self.view {
-                        if page.browse_id == browse_id {
-                            if let Ok(more) = result {
-                                page.shelves.extend(more.shelves);
-                                page.continuation = more.continuation;
-                                if self.more_rounds < MAX_MORE_ROUNDS {
-                                    next = page.continuation.clone();
-                                }
-                            }
+                    if let View::Detail(page) = &mut self.view
+                        && page.browse_id == browse_id
+                        && let Ok(more) = result
+                    {
+                        page.shelves.extend(more.shelves);
+                        page.continuation = more.continuation;
+                        if self.more_rounds < MAX_MORE_ROUNDS {
+                            next = page.continuation.clone();
                         }
                     }
                     if let Some(token) = next {
                         self.more_rounds += 1;
                         self.spawn_more_shelves(ctx, browse_id, token);
                     }
+                }
+                Msg::History(Ok(tracks)) => {
+                    self.history = tracks;
+                    self.prefetch_favorites(ctx);
+                }
+                Msg::History(Err(e)) => {
+                    eprintln!("[history] unavailable: {e}");
                 }
                 Msg::Image { uri, result } => {
                     self.thumb_inflight.remove(&uri);
@@ -774,7 +881,14 @@ impl App {
                             // Cheap now: the pixels are already decoded.
                             let texture =
                                 ctx.load_texture(uri.clone(), image, egui::TextureOptions::LINEAR);
-                            self.thumbnails.insert(uri, texture);
+                            self.thumbnails.insert(uri.clone(), texture);
+                            self.thumb_order.push_back(uri);
+                            // Evict the oldest so memory stays bounded.
+                            while self.thumb_order.len() > MAX_THUMBS {
+                                if let Some(oldest) = self.thumb_order.pop_front() {
+                                    self.thumbnails.remove(&oldest);
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("[thumb] failed {uri}: {e}");
@@ -827,10 +941,10 @@ impl App {
                     }
                 }
             }
-            if let Some(audio) = &self.audio {
-                if let Some(track) = &audio.now_playing {
-                    push(&track.thumbnail);
-                }
+            if let Some(audio) = &self.audio
+                && let Some(track) = &audio.now_playing
+            {
+                push(&track.thumbnail);
             }
         }
 
@@ -891,11 +1005,7 @@ impl App {
                         ui.add_space(8.0);
                     }
                     if self.ytdlp.is_none() {
-                        ui.label(
-                            RichText::new("⚠  yt-dlp not found")
-                                .small()
-                                .color(ui::WARN),
-                        );
+                        ui.label(RichText::new("⚠  yt-dlp not found").small().color(ui::WARN));
                         ui.add_space(6.0);
                     }
                     let (label, color) = if self.authenticated {
@@ -926,64 +1036,87 @@ impl App {
             ui.horizontal(|ui| {
                 // A single interactive height keeps every control level.
                 ui.spacing_mut().interact_size.y = 30.0;
-                ui.add_space(8.0);
-                if ui
-                    .add_enabled(
-                        !matches!(self.view, View::Search),
-                        egui::Button::new("⏴  Back"),
-                    )
-                    .clicked()
-                {
-                    go_back = true;
-                }
-                ui.add_space(4.0);
-                // Centre the search cluster, leaving room for the settings icon.
-                let cluster = 360.0 + 46.0 + 140.0 + 90.0 + 24.0;
-                ui.add_space(((ui.available_width() - 44.0 - cluster) / 2.0).max(0.0));
-                if ui::search_bar(ui, &mut self.query, 360.0) {
-                    do_search = true;
-                }
-                ui.add_space(6.0);
-                egui::ComboBox::from_id_salt("search_filter")
-                    .width(132.0)
-                    .selected_text(self.filter.label())
-                    .show_ui(ui, |ui| {
-                        for option in SearchFilter::ALL_FILTERS {
-                            ui.selectable_value(&mut self.filter, option, option.label());
-                        }
-                    });
-                if ui.button("Search").clicked() {
-                    do_search = true;
-                }
+                // Three fixed regions so the centre really is centred and both
+                // edges get the same padding.
+                let total = ui.available_width();
+                let left_width = 104.0;
+                let right_width = 48.0;
+                let centre_width = (total - left_width - right_width).max(240.0);
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.menu_button("⚙", |ui| {
-                        let theme_label = if self.theme_light {
-                            "☾  Dark theme"
-                        } else {
-                            "☀  Light theme"
-                        };
-                        if ui.button(theme_label).clicked() {
-                            self.theme_light = !self.theme_light;
-                            self.theme_applied = false;
-                            self.save_ui_settings();
-                            ui.close();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_width, 30.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add_space(10.0);
+                        if ui
+                            .add_enabled(
+                                !matches!(self.view, View::Search),
+                                egui::Button::new("⏴  Back"),
+                            )
+                            .clicked()
+                        {
+                            go_back = true;
                         }
-                        ui.separator();
-                        ui.label(
-                            RichText::new(if self.authenticated {
-                                "signed in"
+                    },
+                );
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(centre_width, 30.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        let cluster = 360.0 + 46.0 + 140.0 + 92.0 + 30.0;
+                        ui.add_space(((centre_width - cluster) / 2.0).max(0.0));
+                        if ui::search_bar(ui, &mut self.query, 360.0) {
+                            do_search = true;
+                        }
+                        ui.add_space(6.0);
+                        egui::ComboBox::from_id_salt("search_filter")
+                            .width(132.0)
+                            .selected_text(self.filter.label())
+                            .show_ui(ui, |ui| {
+                                for option in SearchFilter::ALL_FILTERS {
+                                    ui.selectable_value(&mut self.filter, option, option.label());
+                                }
+                            });
+                        if ui.button("Search").clicked() {
+                            do_search = true;
+                        }
+                    },
+                );
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_width, 30.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.add_space(10.0);
+                        ui.menu_button("⚙", |ui| {
+                            let theme_label = if self.theme_light {
+                                "☾  Dark theme"
                             } else {
-                                "anonymous"
-                            })
-                            .small()
-                            .weak(),
-                        );
-                    });
-                    if self.busy {
-                        ui.spinner();
-                    }
-                });
+                                "☀  Light theme"
+                            };
+                            if ui.button(theme_label).clicked() {
+                                self.theme_light = !self.theme_light;
+                                self.theme_applied = false;
+                                self.save_ui_settings();
+                                ui.close();
+                            }
+                            ui.separator();
+                            ui.label(
+                                RichText::new(if self.authenticated {
+                                    "signed in"
+                                } else {
+                                    "anonymous"
+                                })
+                                .small()
+                                .weak(),
+                            );
+                        });
+                        if self.busy {
+                            ui.spinner();
+                        }
+                    },
+                );
             });
             ui.add_space(6.0);
         });
@@ -1018,7 +1151,9 @@ impl App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match &view {
-                    View::Search => self.results_view(ui, &current_video, &mut action, &mut hovered),
+                    View::Search => {
+                        self.results_view(ui, &current_video, &mut action, &mut hovered)
+                    }
                     View::Detail(page) => {
                         self.detail_view(ui, page, &current_video, &mut action, &mut hovered)
                     }
@@ -1236,6 +1371,8 @@ impl App {
                         egui::vec2(ui.available_width(), row_height),
                         Layout::right_to_left(Align::Center),
                         |ui| {
+                            // Right padding so the slider doesn't touch the edge.
+                            ui.add_space(14.0);
                             ui.allocate_ui_with_layout(
                                 egui::vec2(116.0, 16.0),
                                 Layout::left_to_right(Align::Center),
@@ -1257,10 +1394,10 @@ impl App {
                 // Progress row.
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(12.0);
+                    ui.add_space(14.0);
                     ui.label(RichText::new(ui::fmt_time(pos)).weak().small());
                     ui.add_space(10.0);
-                    let bar_width = (ui.available_width() - 70.0).max(80.0);
+                    let bar_width = (ui.available_width() - 78.0).max(80.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(bar_width, 16.0),
                         Layout::left_to_right(Align::Center),
@@ -1272,6 +1409,7 @@ impl App {
                     );
                     ui.add_space(10.0);
                     ui.label(RichText::new(ui::fmt_time(total)).weak().small());
+                    ui.add_space(14.0);
                 });
                 ui.add_space(10.0);
             });
@@ -1283,15 +1421,13 @@ impl App {
         if let Some(audio) = self.audio.as_mut() {
             audio.set_volume(volume);
         }
-        if toggle_pause {
-            if let Some(audio) = self.audio.as_ref() {
-                audio.toggle_pause();
-            }
+        if toggle_pause && let Some(audio) = self.audio.as_ref() {
+            audio.toggle_pause();
         }
-        if let Some(pos) = seek_to {
-            if let Some(audio) = self.audio.as_ref() {
-                audio.seek(Duration::from_secs_f32(pos.max(0.0)));
-            }
+        if let Some(pos) = seek_to
+            && let Some(audio) = self.audio.as_ref()
+        {
+            audio.seek(Duration::from_secs_f32(pos.max(0.0)));
         }
         if step != 0 {
             self.step_track(ctx, step);
@@ -1331,11 +1467,7 @@ impl eframe::App for App {
     }
 }
 
-fn detail_header(
-    ui: &mut egui::Ui,
-    page: &Page,
-    thumbs: &HashMap<String, egui::TextureHandle>,
-) {
+fn detail_header(ui: &mut egui::Ui, page: &Page, thumbs: &HashMap<String, egui::TextureHandle>) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if page.thumbnail.is_some() {
@@ -1373,5 +1505,3 @@ fn detail_header(
     ui.separator();
     ui.add_space(4.0);
 }
-
-

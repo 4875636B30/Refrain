@@ -4,11 +4,11 @@
 //! the same `music.youtube.com/youtubei/v1/*` endpoints the web app uses, with
 //! a spoofed `WEB_REMIX` client context.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use reqwest::header::{
-    HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, REFERER,
+    AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::auth::CookieJar;
 
@@ -81,12 +81,15 @@ impl Client {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ORIGIN, HeaderValue::from_static("https://music.youtube.com"));
-        headers.insert(REFERER, HeaderValue::from_static("https://music.youtube.com/"));
         headers.insert(
-            "X-Goog-Api-Format-Version",
-            HeaderValue::from_static("1"),
+            ORIGIN,
+            HeaderValue::from_static("https://music.youtube.com"),
         );
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://music.youtube.com/"),
+        );
+        headers.insert("X-Goog-Api-Format-Version", HeaderValue::from_static("1"));
         headers.insert(
             "X-YouTube-Client-Name",
             HeaderValue::from_static(CLIENT_NAME_HEADER),
@@ -154,16 +157,16 @@ impl Client {
         let mut headers = self.headers.clone();
         if let Some(jar) = &self.jar {
             let cookie = jar.cookie_header();
-            if !cookie.is_empty() {
-                if let Ok(v) = HeaderValue::from_str(&cookie) {
-                    headers.insert(COOKIE, v);
-                }
+            if !cookie.is_empty()
+                && let Ok(v) = HeaderValue::from_str(&cookie)
+            {
+                headers.insert(COOKIE, v);
             }
             // SAPISIDHASH is time-stamped, so it must be recomputed per request.
-            if let Some(auth) = jar.auth_header(API_ORIGIN) {
-                if let Ok(v) = HeaderValue::from_str(&auth) {
-                    headers.insert(AUTHORIZATION, v);
-                }
+            if let Some(auth) = jar.auth_header(API_ORIGIN)
+                && let Ok(v) = HeaderValue::from_str(&auth)
+            {
+                headers.insert(AUTHORIZATION, v);
             }
             headers.insert("X-Goog-AuthUser", HeaderValue::from_static("0"));
             headers.insert("X-Origin", HeaderValue::from_static(API_ORIGIN));
@@ -220,6 +223,11 @@ impl Client {
             shelves: extract::parse_shelves(&value),
             continuation: extract::parse_continuation(&value),
         })
+    }
+
+    /// The account's listening history, most recent first.
+    pub async fn history(&self) -> Result<Vec<super::domain::Track>> {
+        Ok(self.browse("FEmusic_history").await?.tracks)
     }
 }
 

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
 const DOWNLOAD_TIMEOUT_SECS: u64 = 180;
@@ -56,7 +56,9 @@ fn cookie_args(auth: &crate::config::AuthConfig) -> Vec<String> {
 }
 
 fn env_override() -> Option<PathBuf> {
-    std::env::var_os("YTDLP_PATH").map(PathBuf::from).filter(|p| p.is_file())
+    std::env::var_os("YTDLP_PATH")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
 }
 
 fn home_bin() -> Option<PathBuf> {
@@ -72,9 +74,22 @@ fn search_path() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// A `yt-dlp` shipped next to our own executable, so the app can be distributed
+/// as a self-contained bundle.
+fn beside_executable() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    ["yt-dlp", "yt-dlp_linux", "yt-dlp.exe"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Find a usable `yt-dlp` binary, preferring an explicit override.
 pub fn locate_ytdlp() -> Option<PathBuf> {
-    env_override().or_else(home_bin).or_else(search_path)
+    env_override()
+        .or_else(beside_executable)
+        .or_else(home_bin)
+        .or_else(search_path)
 }
 
 /// Directory holding the decoded-audio cache.
@@ -178,7 +193,12 @@ pub async fn download_track(video_id: &str, auth: &crate::config::AuthConfig) ->
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr.trim().lines().last().unwrap_or("unknown error").to_string();
+        let last = stderr
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("unknown error")
+            .to_string();
         let _ = std::fs::remove_dir_all(&tmp);
         if stderr.contains("Sign in to confirm") || stderr.contains("not a bot") {
             bail!(

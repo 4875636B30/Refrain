@@ -40,8 +40,8 @@ impl AudioEngine {
     pub fn play_file(&mut self, path: &Path, track: Track) -> Result<()> {
         self.stop();
 
-        let file = File::open(path)
-            .with_context(|| format!("opening audio file {}", path.display()))?;
+        let file =
+            File::open(path).with_context(|| format!("opening audio file {}", path.display()))?;
         let decoder = rodio::Decoder::new(BufReader::new(file))
             .context("decoding audio (is ffmpeg available for m4a?)")?;
 
@@ -108,7 +108,10 @@ impl AudioEngine {
     }
 
     pub fn position(&self) -> Duration {
-        self.player.as_ref().map(|p| p.get_pos()).unwrap_or_default()
+        self.player
+            .as_ref()
+            .map(|p| p.get_pos())
+            .unwrap_or_default()
     }
 
     pub fn seek(&self, pos: Duration) {
