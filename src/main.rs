@@ -1,0 +1,256 @@
+//! A desktop YouTube Music client built with egui.
+
+mod app;
+mod audio;
+mod auth;
+mod config;
+mod thumbs;
+mod ytm;
+
+fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--auth-check") {
+        if let Err(e) = auth_check() {
+            eprintln!("auth-check failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--thumb <url>` verifies the artwork pipeline (fetch + decode).
+    if let Some(pos) = args.iter().position(|a| a == "--thumb") {
+        let url = args.get(pos + 1).cloned().unwrap_or_default();
+        if url.is_empty() {
+            eprintln!("usage: --thumb <url>");
+            std::process::exit(2);
+        }
+        if let Err(e) = thumb_cmd(&url) {
+            eprintln!("thumb failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--page <browse_id>` dumps a detail page's tracks and shelves.
+    if let Some(pos) = args.iter().position(|a| a == "--page") {
+        let id = args.get(pos + 1).cloned().unwrap_or_default();
+        if id.is_empty() {
+            eprintln!("usage: --page <browse_id>");
+            std::process::exit(2);
+        }
+        if let Err(e) = page_cmd(&id) {
+            eprintln!("page failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--probe <query>` exercises the InnerTube client without opening a window —
+    // handy for checking that the (unofficial) API still responds as expected.
+    if let Some(pos) = args.iter().position(|a| a == "--probe") {
+        let query = args
+            .get(pos + 1)
+            .cloned()
+            .unwrap_or_else(|| "daft punk".to_string());
+        if let Err(e) = probe(&query) {
+            eprintln!("probe failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if let Some(pos) = args.iter().position(|a| a == "--download") {
+        let id = args.get(pos + 1).cloned().unwrap_or_default();
+        if id.is_empty() {
+            eprintln!("usage: --download <video_id>");
+            std::process::exit(2);
+        }
+        if let Err(e) = download_cmd(&id) {
+            eprintln!("download failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1120.0, 740.0])
+            .with_min_inner_size([820.0, 520.0])
+            .with_title("YouTube Music"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "YouTube Music",
+        options,
+        Box::new(|cc| Ok(Box::new(app::App::new(cc)?))),
+    )
+}
+
+/// Diagnose authentication without opening a window.
+fn auth_check() -> anyhow::Result<()> {
+    let cfg = config::Config::load();
+    println!("config file : {}", config::Config::path().display());
+    println!("auth mode   : {:?}", cfg.auth.mode);
+    println!("yt-dlp      : {:?}", audio::resolver::locate_ytdlp());
+    println!("detected cookie sources:");
+    let sources = auth::detected_sources();
+    if sources.is_empty() {
+        println!("  (none found)");
+    }
+    for s in &sources {
+        println!("  - {s}");
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let Some(resolved) = rt.block_on(auth::resolve(&cfg))? else {
+        println!("\nNo cookie source configured/auto-detected — running anonymously.");
+        return Ok(());
+    };
+
+    println!(
+        "\nchosen source: {} {}",
+        resolved.source.browser,
+        resolved.source.profile
+    );
+    println!(
+        "cookies     : {} total | SAPISID: {} | YouTube session (LOGIN_INFO): {}",
+        resolved.jar.cookies.len(),
+        resolved.jar.has_sapisid(),
+        resolved.jar.has_youtube_session()
+    );
+
+    let client = ytm::Client::new("en", "US", Some(resolved.jar))?;
+    println!("client signed: {}", client.is_authenticated());
+    match rt.block_on(client.logged_in()) {
+        Ok(true) => println!("InnerTube   : LOGGED IN ✅  (library should load)"),
+        Ok(false) => println!(
+            "InnerTube   : anonymous ❌  — sign into music.youtube.com in your browser, then re-run"
+        ),
+        Err(e) => println!("InnerTube   : request failed: {e}"),
+    }
+    Ok(())
+}
+
+fn thumb_cmd(url: &str) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let client = reqwest::Client::builder()
+        .user_agent(thumbs::USER_AGENT)
+        .build()?;
+    let bytes = rt.block_on(thumbs::fetch(&client, url))?;
+    match thumbs::decode(&bytes) {
+        Some(image) => {
+            println!(
+                "fetched {} bytes -> decoded {}x{} ({} px)",
+                bytes.len(),
+                image.size[0],
+                image.size[1],
+                image.pixels.len()
+            );
+            Ok(())
+        }
+        None => anyhow::bail!("could not decode {} bytes", bytes.len()),
+    }
+}
+
+fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let cfg = config::Config::load();
+    let jar = rt.block_on(auth::resolve(&cfg)).ok().flatten().map(|r| r.jar);
+    let client = ytm::Client::new("en", "US", jar)?;
+    let page = rt.block_on(client.browse(browse_id))?;
+
+    println!("{:?} | {} | {}", page.kind, page.title, page.subtitle);
+    println!("tracks: {}", page.tracks.len());
+    for t in page.tracks.iter().take(3) {
+        println!("   - {} — {}", t.title, t.artist_line());
+    }
+    println!("shelves: {}", page.shelves.len());
+    for shelf in &page.shelves {
+        println!("   [{}] {} items", shelf.title, shelf.items.len());
+        for item in shelf.items.iter().take(3) {
+            println!(
+                "       {:?}  {}  —  {}",
+                item.kind, item.title, item.subtitle
+            );
+        }
+    }
+    Ok(())
+}
+
+fn download_cmd(video_id: &str) -> anyhow::Result<()> {
+    use std::io::BufReader;
+    use rodio::Source as _;
+
+    let cfg = config::Config::load();
+    let rt = tokio::runtime::Runtime::new()?;
+    // Resolve the effective cookie source first (auto-detection included), so
+    // playback uses the same browser that authenticated the catalogue.
+    let auth = rt
+        .block_on(auth::resolve(&cfg))?
+        .map(|resolved| resolved.source)
+        .unwrap_or_default();
+    let path = rt.block_on(audio::resolver::download_track(video_id, &auth))?;
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    println!("cached {} ({} bytes)", path.display(), size);
+
+    // Prove rodio can actually decode what yt-dlp produced.
+    let file = std::fs::File::open(&path)?;
+    let mut decoder = rodio::Decoder::new(BufReader::new(file))?;
+    let duration = decoder.total_duration();
+    let samples = decoder.by_ref().take(4096).count();
+    println!(
+        "rodio decode OK: duration={:?}, first {} samples read",
+        duration, samples
+    );
+    Ok(())
+}
+
+fn probe(query: &str) -> anyhow::Result<()> {
+    use ytm::{Client, SearchFilter};
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let cfg = config::Config::load();
+    let jar = rt.block_on(auth::resolve(&cfg)).ok().flatten().map(|r| r.jar);
+    let client = Client::new("en", "US", jar)?;
+
+    println!("== search({query:?}) [Songs] ==");
+    let songs = rt.block_on(client.search(query, SearchFilter::Songs))?;
+    for item in songs.iter().take(5) {
+        let dur = item
+            .duration_secs
+            .map(crate::ytm::domain::fmt_duration)
+            .unwrap_or_else(|| "--:--".into());
+        println!("  {:>6}  {}  |  {}", dur, item.title, item.subtitle);
+    }
+
+    println!("== search({query:?}) [Albums] ==");
+    let albums = rt.block_on(client.search(query, SearchFilter::Albums))?;
+    for item in albums.iter().take(3) {
+        println!("  {}  |  {}", item.title, item.subtitle);
+    }
+
+    if let Some(album) = albums.iter().find(|i| i.browse_id.is_some()) {
+        let id = album.browse_id.clone().unwrap();
+        println!("== browse({id}) ==");
+        let page = rt.block_on(client.browse(&id))?;
+        println!(
+            "  {} • {} • {} tracks",
+            page.kind.label(),
+            page.title,
+            page.tracks.len()
+        );
+        for track in page.tracks.iter().take(6) {
+            println!(
+                "    {} — {} ({})",
+                track.title,
+                track.artist_line(),
+                track.duration_text().unwrap_or_else(|| "--:--".into())
+            );
+        }
+    }
+
+    Ok(())
+}
+
