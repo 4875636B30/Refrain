@@ -5,6 +5,7 @@ mod audio;
 mod auth;
 mod config;
 mod thumbs;
+mod ui;
 mod ytm;
 
 fn main() -> eframe::Result<()> {
@@ -27,6 +28,34 @@ fn main() -> eframe::Result<()> {
         }
         if let Err(e) = thumb_cmd(&url) {
             eprintln!("thumb failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--stream <video_id>` verifies streaming and reports time-to-first-audio.
+    if let Some(pos) = args.iter().position(|a| a == "--stream") {
+        let id = args.get(pos + 1).cloned().unwrap_or_default();
+        if id.is_empty() {
+            eprintln!("usage: --stream <video_id>");
+            std::process::exit(2);
+        }
+        if let Err(e) = stream_cmd(&id) {
+            eprintln!("stream failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--decode <path>` checks that rodio can decode a given audio file.
+    if let Some(pos) = args.iter().position(|a| a == "--decode") {
+        let path = args.get(pos + 1).cloned().unwrap_or_default();
+        if path.is_empty() {
+            eprintln!("usage: --decode <path>");
+            std::process::exit(2);
+        }
+        if let Err(e) = decode_cmd(&path) {
+            eprintln!("decode failed: {e:#}");
             std::process::exit(1);
         }
         return Ok(());
@@ -130,6 +159,52 @@ fn auth_check() -> anyhow::Result<()> {
         ),
         Err(e) => println!("InnerTube   : request failed: {e}"),
     }
+    Ok(())
+}
+
+fn stream_cmd(video_id: &str) -> anyhow::Result<()> {
+    use rodio::Source as _;
+
+    let cfg = config::Config::load();
+    let rt = tokio::runtime::Runtime::new()?;
+    let auth = rt
+        .block_on(auth::resolve(&cfg))?
+        .map(|resolved| resolved.source)
+        .unwrap_or_default();
+
+    let t_resolve = std::time::Instant::now();
+    let url = rt.block_on(audio::resolver::resolve_stream_url(video_id, &auth))?;
+    println!("url resolved in {:?}", t_resolve.elapsed());
+
+    let t_start = std::time::Instant::now();
+    let source = audio::stream::RemoteSource::new(url, None);
+    let decoder = rodio::Decoder::new(source)?;
+    let duration = decoder.total_duration();
+    println!("decoder opened in {:?} (total {:?})", t_start.elapsed(), duration);
+
+    let t_first = std::time::Instant::now();
+    let mut decoder = decoder;
+    let samples = decoder.by_ref().take(44_100 * 2).count(); // ~1s stereo
+    println!(
+        "first ~1s of audio decoded after {:?} ({} samples)",
+        t_first.elapsed(),
+        samples
+    );
+    Ok(())
+}
+
+fn decode_cmd(path: &str) -> anyhow::Result<()> {
+    use rodio::Source as _;
+    use std::io::BufReader;
+
+    let file = std::fs::File::open(path)?;
+    let mut decoder = rodio::Decoder::new(BufReader::new(file))?;
+    let duration = decoder.total_duration();
+    let samples = decoder.by_ref().take(65_536).count();
+    println!(
+        "decode OK: duration={:?}, read {} samples",
+        duration, samples
+    );
     Ok(())
 }
 

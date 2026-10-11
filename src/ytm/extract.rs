@@ -451,6 +451,8 @@ fn friendly_title(browse_id: &str) -> String {
         "FEmusic_liked_playlists" => "Liked Playlists".to_string(),
         "FEmusic_library_albums" => "Library Albums".to_string(),
         "FEmusic_library_artists" => "Library Artists".to_string(),
+        "FEmusic_home" => "Home".to_string(),
+        "FEmusic_explore" => "Explore".to_string(),
         "VLLM" => "Liked Music".to_string(),
         "VLSE" => "Episodes for Later".to_string(),
         _ if browse_id.starts_with("FEmusic_") => "Library".to_string(),

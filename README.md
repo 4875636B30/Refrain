@@ -20,12 +20,14 @@ src/
   config.rs            ~/.config/youtube-music-rs/config.toml
   auth.rs              cookie extraction, SAPISIDHASH, browser auto-detect
   thumbs.rs            artwork fetch (reqwest) + decode (image)
+  ui.rs                theme + reusable widgets (cover grid, list rows)
   ytm/
     client.rs          InnerTube HTTP client (search / browse, authenticated)
     extract.rs         tolerant renderer-tree walking + parsing
     domain.rs          clean domain types (Track, Page, SearchItem)
   audio/
-    resolver.rs        yt-dlp -> cached .m4a stream, on disk
+    resolver.rs        yt-dlp: stream URL resolution + cached downloads
+    stream.rs          range-streaming Read+Seek reader with prefetch
     engine.rs          rodio playback (play/pause/seek/volume)
 ```
 
@@ -37,12 +39,29 @@ parser walks the tree looking for renderer names it recognises
 (`musicResponsiveListItemRenderer`, `musicResponsiveHeaderRenderer`, …). Unknown
 wrappers are simply skipped, so the client keeps working when the layout shifts.
 
-### Playback
+### Playback & streaming
 
-`yt-dlp` resolves YouTube's signature/`n`-param obfuscation, ffmpeg normalises
-audio to `m4a` (AAC), and `rodio` decodes it. Files are cached in
-`~/.cache/youtube-music-rs/audio/<video_id>.m4a`, so replays are instant and
-seeking works. The next track is pre-fetched while the current one plays.
+Pressing play **streams** rather than downloading first. `yt-dlp -g` resolves a
+range-capable `googlevideo` URL; `RemoteSource` presents it to `rodio` as a
+`Read + Seek` backed by a background look-ahead buffer, so audio starts as soon
+as the first bytes land (~0.3 s) instead of after a multi-megabyte download.
+
+- Resolved URLs are cached for a few hours, and the **next** track's URL is
+  resolved ahead of time — so repeats and track changes start almost instantly.
+- The stream is mirrored into `~/.cache/youtube-music-rs/audio/<video_id>.m4a`,
+  so later plays come straight off disk.
+- If no `m4a` stream is offered (or the URL expires), playback falls back to the
+  download path, where ffmpeg transcodes to `m4a`.
+
+The first resolve of a given track still costs a few seconds of `yt-dlp` work,
+because YouTube's JS challenges have to be solved.
+
+### UI
+
+A sidebar (Home / Search / Library) with cover-art grids for albums, artists and
+playlists, list rows for tracks, and a now-playing bar with artwork, transport,
+seek and volume. Dark and light themes, switchable in the sidebar and persisted
+in the config.
 
 ### Authentication
 
@@ -118,8 +137,10 @@ Other non-GUI checks:
 
 ```sh
 cargo run -- --probe "daft punk"      # exercise search + browse
-cargo run -- --page VLLM              # dump a page's tracks and shelves
-cargo run -- --download dQw4w9WgXcQ   # resolve, cache, and decode one track
+cargo run -- --page FEmusic_home       # dump a page's tracks and shelves
+cargo run -- --stream <video_id>      # stream + report time-to-first-audio
+cargo run -- --download <video_id>    # resolve, cache, and decode one track
+cargo run -- --decode <path>          # decode a local audio file
 cargo run -- --thumb <url>            # verify the artwork pipeline
 cargo run -- --auth-check             # sign-in diagnostics
 ```
@@ -137,13 +158,14 @@ Verified working:
 - [x] Filtered search (All / Songs / Albums / Artists / Playlists)
 - [x] Album, playlist and artist detail pages with artwork
 - [x] Browsable carousels — artist albums/singles/videos, featured playlists, related artists
-- [x] yt-dlp → ffmpeg → `m4a` → rodio decode pipeline
-- [x] Playback UI: play/pause, prev/next, seek, volume, auto-advance, prefetch
+- [x] **Streaming playback** (range-based, `~0.3 s` to first audio) with URL
+      caching, next-track prefetch, on-disk write-through and download fallback
+- [x] Playback UI: play/pause, prev/next, seek, volume, auto-advance
+- [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family
       (incl. Flatpak), plus `cookies.txt` import
 - [x] `SAPISIDHASH`-authenticated InnerTube requests
-- [x] Library view — the **Library** button opens `FEmusic_library_landing`
-      (grid of Liked Music / playlists), and those open into normal playlists
+- [x] Library and Home feeds
 
 When several browsers are present, `auto` picks the first one that actually has
 a **YouTube session**, so a logged-out Firefox won't shadow a signed-in Brave.
@@ -156,6 +178,9 @@ Known limitations:
 
 - Anonymous playback is bot-blocked for much of the music catalogue; a signed-in
   browser session is required for reliable playback.
+- The *first* play of a given track waits a few seconds while `yt-dlp` resolves
+  the stream URL; repeats and track changes are then near-instant.
+- Streaming needs an `m4a` stream; otherwise playback falls back to downloading.
 - The InnerTube endpoint/params are unofficial and may need updating over time.
 
 ## Legal

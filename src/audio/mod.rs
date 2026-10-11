@@ -2,5 +2,6 @@
 
 pub mod engine;
 pub mod resolver;
+pub mod stream;
 
 pub use engine::AudioEngine;

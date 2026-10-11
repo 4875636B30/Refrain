@@ -11,16 +11,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use egui::{Align, Color32, Layout, RichText};
+use egui::{Align, Layout, RichText};
 
 use crate::audio::{resolver, AudioEngine};
 use crate::auth::ResolvedAuth;
 use crate::config::{AuthConfig, AuthMode, Config};
 use crate::ytm::{Client, Page, SearchFilter, SearchItem, Track};
 use crate::thumbs;
+use crate::ui;
 
 enum Msg {
     Search(Result<Vec<SearchItem>, String>),
@@ -30,6 +31,10 @@ enum Msg {
         result: Result<PathBuf, String>,
     },
     Auth(Result<Option<ResolvedAuth>, String>),
+    Stream {
+        video_id: String,
+        result: Result<String, String>,
+    },
     Image {
         uri: String,
         result: Result<Vec<u8>, String>,
@@ -53,6 +58,50 @@ enum Action {
     PlaySingle(Track),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nav {
+    Home,
+    Search,
+    Library,
+}
+
+/// Turn a clicked result/shelf item into an action.
+fn activate(items: &[SearchItem], idx: usize) -> Option<Action> {
+    let item = items.get(idx)?;
+    if item.playable() {
+        item.to_track().map(Action::PlaySingle)
+    } else {
+        item.browse_id.clone().map(Action::Open)
+    }
+}
+
+fn empty_state(ui: &mut egui::Ui, busy: bool) {
+    ui.add_space(72.0);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(if busy {
+                "Searching…"
+            } else {
+                "Search YouTube Music to get started."
+            })
+            .weak(),
+        );
+    });
+}
+
+fn nav_button(ui: &mut egui::Ui, current: &mut Nav, value: Nav, label: &str) {
+    let selected = *current == value;
+    let text = RichText::new(label).size(15.0);
+    let text = if selected { text.strong() } else { text };
+    let width = ui.available_width();
+    if ui
+        .add_sized([width, 30.0], egui::Button::selectable(selected, text))
+        .clicked()
+    {
+        *current = value;
+    }
+}
+
 pub struct App {
     rt: tokio::runtime::Runtime,
     client: Arc<Client>,
@@ -68,6 +117,9 @@ pub struct App {
 
     query: String,
     filter: SearchFilter,
+    nav: Nav,
+    theme_light: bool,
+    theme_applied: bool,
     view: View,
     results: Vec<SearchItem>,
 
@@ -78,6 +130,9 @@ pub struct App {
     current: Option<usize>,
     pending_play: Option<Track>,
     downloading: HashSet<String>,
+    streaming: HashSet<String>,
+    /// Resolved stream URLs, valid for a few hours.
+    url_cache: HashMap<String, (String, Instant)>,
     advance_armed: bool,
 
     audio: Option<AudioEngine>,
@@ -141,6 +196,7 @@ impl App {
         // previously-discovered source lets it start immediately without
         // waiting for the (slower) InnerTube cookie extraction.
         let auth = crate::auth::cached_source().unwrap_or_else(|| cfg.auth.clone());
+        let theme_light = cfg.ui.theme == "light";
         Ok(Self {
             rt,
             client,
@@ -152,6 +208,9 @@ impl App {
             deferred_play: None,
             query: String::new(),
             filter: SearchFilter::All,
+            nav: Nav::Search,
+            theme_light,
+            theme_applied: false,
             view: View::Search,
             results: Vec::new(),
             status,
@@ -160,6 +219,8 @@ impl App {
             current: None,
             pending_play: None,
             downloading: HashSet::new(),
+            streaming: HashSet::new(),
+            url_cache: HashMap::new(),
             advance_armed: false,
             audio,
             audio_error,
@@ -204,6 +265,22 @@ impl App {
         });
     }
 
+    fn spawn_stream(&mut self, ctx: &egui::Context, video_id: String) {
+        if !self.streaming.insert(video_id.clone()) {
+            return;
+        }
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let auth = self.auth.clone();
+        self.rt.spawn(async move {
+            let result = resolver::resolve_stream_url(&video_id, &auth)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Stream { video_id, result });
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_download(&mut self, ctx: &egui::Context, video_id: String) {
         if !self.downloading.insert(video_id.clone()) {
             return; // already in flight
@@ -239,16 +316,59 @@ impl App {
         if path.exists() {
             self.pending_play = None;
             self.play_path(&path, track);
+        } else if let Some(url) = self.cached_url(&track.video_id) {
+            // Already resolved: start streaming immediately.
+            self.pending_play = None;
+            if !self.play_url(url, track.clone()) {
+                self.status = Some("Streaming failed — downloading…".to_string());
+                self.pending_play = Some(track.clone());
+                self.spawn_download(ctx, track.video_id.clone());
+            }
         } else {
-            self.status = Some(format!("Loading “{}”…", track.title));
+            self.status = Some(format!("Buffering “{}”…", track.title));
             self.pending_play = Some(track.clone());
-            self.spawn_download(ctx, track.video_id.clone());
+            self.spawn_stream(ctx, track.video_id.clone());
         }
 
-        // Warm the cache for the next track so the transition is instant.
+        // Resolve the next track's URL ahead of time so advancing is instant.
         if let Some(next) = self.queue.get(idx + 1).cloned() {
-            if !resolver::cache_path(&next.video_id).exists() {
-                self.spawn_download(ctx, next.video_id.clone());
+            if !resolver::cache_path(&next.video_id).exists()
+                && self.cached_url(&next.video_id).is_none()
+            {
+                self.spawn_stream(ctx, next.video_id.clone());
+            }
+        }
+    }
+
+    /// A stream URL resolved recently enough to still be valid.
+    fn cached_url(&self, video_id: &str) -> Option<String> {
+        self.url_cache.get(video_id).and_then(|(url, at)| {
+            // YouTube URLs expire after about six hours; stay well clear.
+            (at.elapsed() < Duration::from_secs(4 * 3600)).then(|| url.clone())
+        })
+    }
+
+    /// Start streaming an already-resolved URL. Returns false on failure.
+    fn play_url(&mut self, url: String, track: Track) -> bool {
+        let Some(audio) = self.audio.as_mut() else {
+            self.status = Some(
+                self.audio_error
+                    .clone()
+                    .unwrap_or_else(|| "Audio output unavailable".to_string()),
+            );
+            return false;
+        };
+        let cache = resolver::cache_path(&track.video_id);
+        let source = crate::audio::stream::RemoteSource::new(url, Some(cache));
+        match audio.play_remote(source, track) {
+            Ok(()) => {
+                self.status = None;
+                self.advance_armed = true;
+                true
+            }
+            Err(e) => {
+                self.status = Some(format!("Playback failed: {e}"));
+                false
             }
         }
     }
@@ -386,6 +506,39 @@ impl App {
                         self.play_index(ctx, idx);
                     }
                 }
+                Msg::Stream { video_id, result } => {
+                    self.streaming.remove(&video_id);
+                    if let Ok(url) = &result {
+                        self.url_cache
+                            .insert(video_id.clone(), (url.clone(), Instant::now()));
+                    }
+                    let is_pending = self
+                        .pending_play
+                        .as_ref()
+                        .map(|t| t.video_id == video_id)
+                        .unwrap_or(false);
+                    if is_pending {
+                        match result {
+                            Ok(url) => {
+                                let track = self.pending_play.clone().expect("pending track");
+                                if self.play_url(url, track) {
+                                    self.pending_play = None;
+                                } else {
+                                    self.status =
+                                        Some("Streaming failed — downloading…".to_string());
+                                    self.spawn_download(ctx, video_id);
+                                }
+                            }
+                            Err(e) => {
+                                // No m4a stream available (or it expired):
+                                // fall back to the download path.
+                                self.status =
+                                    Some(format!("Streaming unavailable ({e}) — downloading…"));
+                                self.spawn_download(ctx, video_id);
+                            }
+                        }
+                    }
+                }
                 Msg::Image { uri, result } => {
                     self.thumb_inflight.remove(&uri);
                     match result {
@@ -478,33 +631,91 @@ impl App {
         }
     }
 
+    /// Left navigation rail.
+    fn sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut nav = self.nav;
+        egui::Panel::left("sidebar")
+            .resizable(false)
+            .exact_size(190.0)
+            .show(ui, |ui| {
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("♪  YouTube Music").size(16.0).strong());
+                });
+                ui.add_space(14.0);
+                nav_button(ui, &mut nav, Nav::Home, "🏠   Home");
+                nav_button(ui, &mut nav, Nav::Search, "🔍   Search");
+                nav_button(ui, &mut nav, Nav::Library, "📚   Library");
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                let theme_label = if self.theme_light {
+                    "☾   Dark theme"
+                } else {
+                    "☀   Light theme"
+                };
+                if ui.button(theme_label).clicked() {
+                    self.theme_light = !self.theme_light;
+                    self.theme_applied = false;
+                    self.save_ui_settings();
+                }
+
+                ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+                    ui.add_space(12.0);
+                    if let Some(msg) = &self.status {
+                        ui.label(RichText::new(msg).small().weak());
+                        ui.add_space(8.0);
+                    }
+                    if self.ytdlp.is_none() {
+                        ui.label(
+                            RichText::new("⚠  yt-dlp not found")
+                                .small()
+                                .color(ui::WARN),
+                        );
+                        ui.add_space(6.0);
+                    }
+                    let (label, color) = if self.authenticated {
+                        ("●  signed in", ui::ACCENT)
+                    } else {
+                        ("○  anonymous", ui.visuals().weak_text_color())
+                    };
+                    ui.label(RichText::new(label).small().color(color));
+                });
+            });
+
+        if nav != self.nav {
+            self.nav = nav;
+            match nav {
+                Nav::Home => self.open_page(ctx, "FEmusic_home".to_string()),
+                Nav::Search => self.view = View::Search,
+                Nav::Library => self.open_page(ctx, "FEmusic_library_landing".to_string()),
+            }
+        }
+    }
+
+    /// Search box, filter and navigation controls.
     fn top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut do_search = false;
         let mut go_back = false;
-        let mut open_library = false;
         egui::Panel::top("top").show(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading("YouTube Music");
-                ui.separator();
-                if self.authenticated {
-                    ui.label(
-                        RichText::new("● signed in").small().color(Color32::from_rgb(120, 200, 120)),
-                    );
-                }
+                ui.add_space(4.0);
                 if ui
-                    .add_enabled(!matches!(self.view, View::Search), egui::Button::new("⏴ Back"))
+                    .add_enabled(
+                        !matches!(self.view, View::Search),
+                        egui::Button::new("⏴  Back"),
+                    )
                     .clicked()
                 {
                     go_back = true;
                 }
-                if ui.button("Library").clicked() {
-                    open_library = true;
-                }
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .hint_text("Search songs, albums, artists…")
-                        .desired_width(320.0),
+                        .desired_width(380.0),
                 );
                 let submitted =
                     edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -524,149 +735,142 @@ impl App {
                     ui.spinner();
                 }
             });
-
-            if let Some(msg) = &self.status {
-                ui.label(RichText::new(msg).color(Color32::from_rgb(230, 140, 120)));
-            } else if self.ytdlp.is_none() {
-                ui.label(
-                    RichText::new(
-                        "yt-dlp not found. Install it or set YTDLP_PATH to enable playback.",
-                    )
-                    .color(Color32::from_rgb(230, 180, 100)),
-                );
-            }
-            ui.add_space(4.0);
+            ui.add_space(8.0);
         });
 
         if go_back {
+            self.nav = Nav::Search;
             self.view = View::Search;
         }
-        if open_library {
-            self.open_page(ctx, "FEmusic_library_landing".to_string());
-        }
         if do_search {
+            self.nav = Nav::Search;
             self.run_search(ctx);
         }
+    }
+
+    fn save_ui_settings(&self) {
+        let mut cfg = Config::load();
+        cfg.ui.theme = if self.theme_light { "light" } else { "dark" }.to_string();
+        cfg.ui.volume = self.volume;
+        let _ = cfg.save();
     }
 
     fn central(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut action: Option<Action> = None;
         let view = std::mem::replace(&mut self.view, View::Search);
+        let current_video = self
+            .current
+            .and_then(|c| self.queue.get(c))
+            .map(|t| t.video_id.clone());
+
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match &view {
-                    View::Search => {
-                        if self.results.is_empty() {
-                            ui.add_space(48.0);
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new(if self.busy {
-                                        "Searching…"
-                                    } else {
-                                        "Search YouTube Music to get started."
-                                    })
-                                    .weak(),
-                                );
-                            });
-                        }
-                        for (idx, item) in self.results.iter().enumerate() {
-                            let selected = item
-                                .video_id
-                                .as_deref()
-                                .map(|vid| {
-                                    self.current
-                                        .and_then(|c| self.queue.get(c))
-                                        .map(|t| t.video_id == vid)
-                                        .unwrap_or(false)
-                                })
-                                .unwrap_or(false);
-                            let trailing = item.duration_secs.map(crate::ytm::domain::fmt_duration);
-                            let row = list_row(
-                                ui,
-                                &self.thumbnails,
-                                ("search", idx),
-                                item.thumbnail.as_deref(),
-                                &item.title,
-                                &item.subtitle,
-                                trailing.as_deref(),
-                                selected,
-                                item.playable(),
-                                item.navigable(),
-                            );
-                            if row.clicked() {
-                                if item.playable() {
-                                    if let Some(track) = item.to_track() {
-                                        action = Some(Action::PlaySingle(track));
-                                    }
-                                } else if let Some(id) = item.browse_id.clone() {
-                                    action = Some(Action::Open(id));
-                                }
-                            }
-                        }
-                    }
-                    View::Detail(page) => {
-                        detail_header(ui, page, &self.thumbnails);
-                        for (idx, track) in page.tracks.iter().enumerate() {
-                            let selected = self.current == Some(idx);
-                            let trailing = track.duration_text();
-                            let row = list_row(
-                                ui,
-                                &self.thumbnails,
-                                ("track", idx),
-                                track.thumbnail.as_deref(),
-                                &track.title,
-                                &track.artist_line(),
-                                trailing.as_deref(),
-                                selected,
-                                true,
-                                false,
-                            );
-                            if row.clicked() {
-                                action = Some(Action::PlayQueueIndex(idx));
-                            }
-                        }
-
-                        // Browsable carousels (artist albums, related, library…).
-                        for (shelf_idx, shelf) in page.shelves.iter().enumerate() {
-                            if shelf.items.is_empty() {
-                                continue;
-                            }
-                            ui.add_space(10.0);
-                            if !shelf.title.is_empty() {
-                                ui.label(RichText::new(&shelf.title).strong().size(17.0));
-                                ui.add_space(2.0);
-                            }
-                            for (item_idx, item) in shelf.items.iter().enumerate() {
-                                let row = list_row(
-                                    ui,
-                                    &self.thumbnails,
-                                    ("shelf", shelf_idx, item_idx),
-                                    item.thumbnail.as_deref(),
-                                    &item.title,
-                                    &item.subtitle,
-                                    None,
-                                    false,
-                                    item.playable(),
-                                    item.navigable(),
-                                );
-                                if row.clicked() {
-                                    if item.playable() {
-                                        if let Some(track) = item.to_track() {
-                                            action = Some(Action::PlaySingle(track));
-                                        }
-                                    } else if let Some(id) = item.browse_id.clone() {
-                                        action = Some(Action::Open(id));
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    View::Search => self.results_view(ui, &current_video, &mut action),
+                    View::Detail(page) => self.detail_view(ui, page, &current_video, &mut action),
                 });
         });
+
         self.view = view;
         if let Some(action) = action {
             self.handle_action(ctx, action);
+        }
+    }
+
+    fn results_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        current_video: &Option<String>,
+        action: &mut Option<Action>,
+    ) {
+        if self.results.is_empty() {
+            empty_state(ui, self.busy);
+            return;
+        }
+        // Songs read better as rows; everything else is cover art.
+        if self.filter == SearchFilter::Songs {
+            for (idx, item) in self.results.iter().enumerate() {
+                let selected = item.video_id.as_deref() == current_video.as_deref();
+                let trailing = item.duration_secs.map(crate::ytm::domain::fmt_duration);
+                let row = ui::list_row(
+                    ui,
+                    &self.thumbnails,
+                    ("search", idx),
+                    item.thumbnail.as_deref(),
+                    &item.title,
+                    &item.subtitle,
+                    trailing.as_deref(),
+                    Some(idx),
+                    selected,
+                    item.playable(),
+                    item.navigable(),
+                );
+                if row.clicked() {
+                    *action = activate(&self.results, idx);
+                }
+            }
+        } else if let Some(idx) = ui::cover_grid(
+            ui,
+            &self.thumbnails,
+            &self.results,
+            156.0,
+            current_video.as_deref(),
+        ) {
+            *action = activate(&self.results, idx);
+        }
+    }
+
+    fn detail_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        page: &Page,
+        current_video: &Option<String>,
+        action: &mut Option<Action>,
+    ) {
+        detail_header(ui, page, &self.thumbnails);
+
+        for (idx, track) in page.tracks.iter().enumerate() {
+            let selected = self.current == Some(idx)
+                && current_video.as_deref() == Some(track.video_id.as_str());
+            let trailing = track.duration_text();
+            let row = ui::list_row(
+                ui,
+                &self.thumbnails,
+                ("track", idx),
+                track.thumbnail.as_deref(),
+                &track.title,
+                &track.artist_line(),
+                trailing.as_deref(),
+                Some(idx),
+                selected,
+                true,
+                false,
+            );
+            if row.clicked() {
+                *action = Some(Action::PlayQueueIndex(idx));
+            }
+        }
+
+        // Browsable carousels (artist albums, related, the home feed…).
+        for shelf in &page.shelves {
+            if shelf.items.is_empty() {
+                continue;
+            }
+            ui.add_space(18.0);
+            if !shelf.title.is_empty() {
+                ui.label(RichText::new(&shelf.title).size(18.0).strong());
+                ui.add_space(6.0);
+            }
+            if let Some(idx) = ui::cover_grid(
+                ui,
+                &self.thumbnails,
+                &shelf.items,
+                156.0,
+                current_video.as_deref(),
+            ) {
+                *action = activate(&shelf.items, idx);
+            }
         }
     }
 
@@ -694,7 +898,7 @@ impl App {
             ui.horizontal(|ui| {
                 if let Some(track) = &audio.now_playing {
                     if track.thumbnail.is_some() {
-                        draw_thumbnail(
+                        ui::draw_thumbnail(
                             ui,
                             track.thumbnail.as_deref(),
                             &self.thumbnails,
@@ -744,9 +948,9 @@ impl App {
                 seek_to = Some(new_pos);
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new(fmt_time(pos)).weak().small());
+                ui.label(RichText::new(ui::fmt_time(pos)).weak().small());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(fmt_time(total)).weak().small());
+                    ui.label(RichText::new(ui::fmt_time(total)).weak().small());
                 });
             });
             ui.add_space(6.0);
@@ -776,9 +980,15 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        if !self.theme_applied {
+            ui::apply_theme(&ctx, self.theme_light);
+            self.theme_applied = true;
+        }
+
         self.drain_messages(&ctx);
         self.ensure_thumbnails(&ctx);
         self.tick_playback(&ctx);
+        self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);
         self.central(ui, &ctx);
@@ -786,35 +996,6 @@ impl eframe::App for App {
         let playing = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
         if self.busy || !self.downloading.is_empty() || playing {
             ctx.request_repaint_after(Duration::from_millis(250));
-        }
-    }
-}
-
-fn fmt_time(secs: f32) -> String {
-    let secs = secs.max(0.0) as u32;
-    format!("{}:{:02}", secs / 60, secs % 60)
-}
-
-/// Draw a cached thumbnail, or a neutral placeholder while it loads.
-fn draw_thumbnail(
-    ui: &mut egui::Ui,
-    uri: Option<&str>,
-    thumbs: &HashMap<String, egui::TextureHandle>,
-    size: egui::Vec2,
-    radius: f32,
-) {
-    match uri.and_then(|u| thumbs.get(u)) {
-        Some(texture) => {
-            ui.add(
-                egui::Image::from_texture(texture)
-                    .fit_to_exact_size(size)
-                    .corner_radius(radius),
-            );
-        }
-        None => {
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, radius, ui.visuals().widgets.inactive.bg_fill);
         }
     }
 }
@@ -827,7 +1008,7 @@ fn detail_header(
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if page.thumbnail.is_some() {
-            draw_thumbnail(
+            ui::draw_thumbnail(
                 ui,
                 page.thumbnail.as_deref(),
                 thumbs,
@@ -862,63 +1043,4 @@ fn detail_header(
     ui.add_space(4.0);
 }
 
-/// One clickable list row with an optional thumbnail.
-#[allow(clippy::too_many_arguments)]
-fn list_row(
-    ui: &mut egui::Ui,
-    thumbs: &HashMap<String, egui::TextureHandle>,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    thumb: Option<&str>,
-    title: &str,
-    subtitle: &str,
-    trailing: Option<&str>,
-    selected: bool,
-    playable: bool,
-    navigable: bool,
-) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, 52.0), egui::Sense::click());
-    let hovered = response.hovered();
-    let visuals = ui.visuals();
-    if selected {
-        ui.painter()
-            .rect_filled(rect, 6.0, visuals.selection.bg_fill);
-    } else if hovered {
-        ui.painter()
-            .rect_filled(rect, 6.0, visuals.widgets.hovered.bg_fill);
-    }
 
-    let inner = rect.shrink2(egui::vec2(6.0, 4.0));
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .id_salt(id)
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            draw_thumbnail(ui, thumb, thumbs, egui::vec2(40.0, 40.0), 4.0);
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new(title).strong());
-                if !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).weak().small());
-                }
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(t) = trailing {
-                    ui.label(RichText::new(t).weak().small());
-                }
-                if hovered && playable {
-                    ui.label(RichText::new("▶").weak());
-                } else if hovered && navigable {
-                    ui.label(RichText::new("›").weak().size(18.0));
-                }
-            });
-        },
-    );
-
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    response
-}

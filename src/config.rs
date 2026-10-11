@@ -152,10 +152,15 @@ impl AuthConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub volume: f32,
+    /// "dark" or "light".
+    pub theme: String,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { volume: 0.8 }
+        Self {
+            volume: 0.8,
+            theme: "dark".to_string(),
+        }
     }
 }

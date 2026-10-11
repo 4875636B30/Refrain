@@ -91,6 +91,59 @@ fn is_cached(path: &Path) -> bool {
     path.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
+/// Resolve a direct, range-capable audio URL.
+///
+/// Restricted to `m4a` on purpose: YouTube serves it as a progressive stream
+/// with the `moov` atom first, which `rodio` can decode incrementally. If no
+/// `m4a` is offered the caller should fall back to downloading (which lets
+/// ffmpeg transcode).
+pub async fn resolve_stream_url(
+    video_id: &str,
+    auth: &crate::config::AuthConfig,
+) -> Result<String> {
+    let ytdlp = locate_ytdlp().context("yt-dlp not found")?;
+
+    let mut args: Vec<String> = Vec::new();
+    args.extend(js_runtime_args());
+    args.extend(auth.ytdlp_args());
+    args.extend([
+        "-f".to_string(),
+        "bestaudio[ext=m4a]".to_string(),
+        "--no-playlist".to_string(),
+        "--no-warnings".to_string(),
+        "--no-progress".to_string(),
+        "-g".to_string(),
+        format!("https://www.youtube.com/watch?v={video_id}"),
+    ]);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        Command::new(&ytdlp).args(&args).output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("yt-dlp timed out resolving the stream URL"))?
+    .context("spawning yt-dlp")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "could not resolve a streamable URL for {video_id}: {}",
+            stderr.trim().lines().last().unwrap_or("unknown error")
+        );
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !url.starts_with("http") {
+        bail!("yt-dlp returned no stream URL for {video_id}");
+    }
+    Ok(url)
+}
+
 /// Download and cache a track's audio. Returns the path to the playable file.
 pub async fn download_track(video_id: &str, auth: &crate::config::AuthConfig) -> Result<PathBuf> {
     let dest = cache_path(video_id);
