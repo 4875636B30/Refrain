@@ -202,6 +202,14 @@ pub fn draw_thumbnail(
     }
 }
 
+/// What happened when a list row was drawn.
+pub struct RowOutcome {
+    pub clicked: bool,
+    pub hovered: bool,
+    /// A linked name inside the row (artist or album) was clicked.
+    pub link: Option<String>,
+}
+
 /// One clickable list row with a thumbnail.
 #[allow(clippy::too_many_arguments)]
 pub fn list_row(
@@ -210,16 +218,17 @@ pub fn list_row(
     id: impl std::hash::Hash + std::fmt::Debug,
     thumb: Option<&str>,
     title: &str,
-    subtitle: &str,
+    segments: &[(String, Option<String>)],
     trailing: Option<&str>,
     index: Option<usize>,
     selected: bool,
     playable: bool,
     navigable: bool,
-) -> egui::Response {
+) -> RowOutcome {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::click());
     let hovered = response.hovered();
+    let mut link: Option<String> = None;
     if selected {
         ui.painter().rect_filled(
             rect,
@@ -263,8 +272,24 @@ pub fn list_row(
             ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new(title).strong());
-                if !subtitle.is_empty() {
-                    ui.label(RichText::new(subtitle).weak().small());
+                if !segments.is_empty() {
+                    ui.horizontal(|ui| {
+                        // The parts carry their own separators, so don't add
+                        // extra spacing between them.
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (text, target) in segments {
+                            match target {
+                                Some(browse_id) => {
+                                    if ui.link(RichText::new(text).small()).clicked() {
+                                        link = Some(browse_id.clone());
+                                    }
+                                }
+                                None => {
+                                    ui.label(RichText::new(text).weak().small());
+                                }
+                            }
+                        }
+                    });
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -281,7 +306,11 @@ pub fn list_row(
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    response
+    RowOutcome {
+        clicked: response.clicked(),
+        hovered,
+        link,
+    }
 }
 
 /// A cover-art tile for grids.

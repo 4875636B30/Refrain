@@ -135,6 +135,7 @@ pub fn parse_duration(s: &str) -> Option<u32> {
 #[derive(Clone, Debug, Default)]
 struct Run {
     text: String,
+    browse_id: Option<String>,
     page_type: Option<String>,
     watch_id: Option<String>,
 }
@@ -163,7 +164,7 @@ fn runs_of(text_node: &Value) -> Vec<Run> {
     let mut out = Vec::new();
     if let Some(runs) = text_node.get("runs").and_then(Value::as_array) {
         for r in runs {
-            let (_, page_type, watch_id) = r
+            let (browse_id, page_type, watch_id) = r
                 .get("navigationEndpoint")
                 .map(endpoint_ids)
                 .unwrap_or((None, None, None));
@@ -173,6 +174,7 @@ fn runs_of(text_node: &Value) -> Vec<Run> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
+                browse_id,
                 page_type,
                 watch_id,
             });
@@ -251,6 +253,29 @@ fn album_from_runs(runs: &[Run]) -> Option<String> {
         .map(|r| r.text.trim().to_string())
 }
 
+fn artist_ids_from_runs(runs: &[Run]) -> Vec<String> {
+    runs.iter()
+        .filter(|run| run.page_type.as_deref() == Some("MUSIC_PAGE_TYPE_ARTIST"))
+        .filter_map(|run| run.browse_id.clone())
+        .collect()
+}
+
+/// Split a row's secondary column into labelled parts; linked parts get a
+/// browse id so the UI can make just those clickable.
+fn segments_from_runs(runs: &[Run]) -> Vec<(String, Option<String>)> {
+    runs.iter()
+        .map(|run| {
+            let link = matches!(
+                run.page_type.as_deref(),
+                Some("MUSIC_PAGE_TYPE_ARTIST") | Some("MUSIC_PAGE_TYPE_ALBUM")
+            )
+            .then(|| run.browse_id.clone())
+            .flatten();
+            (run.text.clone(), link)
+        })
+        .collect()
+}
+
 fn duration_from(item: &Value, cols: &[Vec<Run>]) -> Option<u32> {
     for t in fixed_texts(item) {
         if let Some(d) = parse_duration(&t) {
@@ -294,6 +319,7 @@ pub fn parse_track(item: &Value) -> Option<Track> {
         video_id,
         title,
         artists: artists_from_runs(&subtitle_runs),
+        artist_ids: artist_ids_from_runs(&subtitle_runs),
         album: album_from_runs(&subtitle_runs),
         duration_secs: duration_from(item, &cols),
         thumbnail: largest_thumbnail(item),
@@ -355,6 +381,7 @@ fn parse_search_item(item: &Value) -> Option<SearchItem> {
         title,
         artists: artists_from_runs(&subtitle_runs),
         subtitle: subtitle_runs.iter().map(|r| r.text.clone()).collect(),
+        segments: segments_from_runs(&subtitle_runs),
         kind,
         browse_id,
         video_id,
@@ -406,6 +433,7 @@ pub fn parse_two_row_item(item: &Value) -> Option<SearchItem> {
         title,
         artists: artists_from_runs(&subtitle_runs),
         subtitle: subtitle_runs.iter().map(|r| r.text.clone()).collect(),
+        segments: segments_from_runs(&subtitle_runs),
         kind,
         browse_id,
         video_id: watch_id,

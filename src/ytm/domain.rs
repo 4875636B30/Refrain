@@ -6,6 +6,8 @@ pub struct Track {
     pub video_id: String,
     pub title: String,
     pub artists: Vec<String>,
+    /// Browse ids parallel to `artists`, so names can be opened.
+    pub artist_ids: Vec<String>,
     pub album: Option<String>,
     pub duration_secs: Option<u32>,
     pub thumbnail: Option<String>,
@@ -108,6 +110,8 @@ pub struct SearchItem {
     pub artists: Vec<String>,
     /// Full secondary line, e.g. `Daft Punk • Random Access Memories • 5:38`.
     pub subtitle: String,
+    /// The subtitle split into parts; `Some(id)` marks a clickable link.
+    pub segments: Vec<(String, Option<String>)>,
     pub kind: ItemKind,
     pub browse_id: Option<String>,
     pub video_id: Option<String>,
@@ -131,6 +135,14 @@ impl SearchItem {
             video_id: self.video_id.clone()?,
             title: self.title.clone(),
             artists: self.artists.clone(),
+            artist_ids: self
+                .segments
+                .iter()
+                .filter(|(_, link)| link.is_some())
+                .filter_map(|(name, link)| {
+                    self.artists.contains(name).then(|| link.clone()).flatten()
+                })
+                .collect(),
             album: None,
             duration_secs: self.duration_secs,
             thumbnail: self.thumbnail.clone(),
@@ -143,6 +155,7 @@ impl SearchItem {
             title: track.title.clone(),
             artists: track.artists.clone(),
             subtitle: track.artist_line(),
+            segments: Vec::new(),
             kind: ItemKind::Song,
             browse_id: None,
             video_id: Some(track.video_id.clone()),

@@ -21,7 +21,7 @@ use crate::auth::ResolvedAuth;
 use crate::config::{AuthConfig, AuthMode, Config};
 use crate::thumbs;
 use crate::ui;
-use crate::ytm::{Client, Page, SearchFilter, SearchItem, Track};
+use crate::ytm::{Client, ItemKind, Page, SearchFilter, SearchItem, Track};
 
 enum Msg {
     Search(Result<Vec<SearchSection>, String>),
@@ -134,8 +134,23 @@ struct SearchSection {
     items: Vec<SearchItem>,
 }
 
-/// Run a search: one request for a chosen category, or one per category for
-/// "All", so each section holds genuine top picks for that category.
+/// Which item kind a category holds.
+fn kind_for_filter(filter: SearchFilter) -> Option<ItemKind> {
+    match filter {
+        SearchFilter::Songs => Some(ItemKind::Song),
+        SearchFilter::Videos => Some(ItemKind::Video),
+        SearchFilter::Albums => Some(ItemKind::Album),
+        SearchFilter::Artists => Some(ItemKind::Artist),
+        SearchFilter::Playlists => Some(ItemKind::Playlist),
+        SearchFilter::All => None,
+    }
+}
+
+/// Run a search: one request for a chosen category, or a single "All" request
+/// that is then grouped into categories.
+///
+/// Grouping the "All" response preserves YouTube's own relevance order, which is
+/// noticeably better than asking for each category separately.
 async fn search_sections(
     client: &Client,
     query: &str,
@@ -149,33 +164,32 @@ async fn search_sections(
         return Ok(vec![SearchSection { filter, items }]);
     }
 
-    const CATEGORIES: [SearchFilter; 5] = [
+    let items = client
+        .search(query, SearchFilter::All)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut sections = Vec::new();
+    for category in [
         SearchFilter::Songs,
         SearchFilter::Videos,
         SearchFilter::Albums,
         SearchFilter::Artists,
         SearchFilter::Playlists,
-    ];
-    let (songs, videos, albums, artists, playlists) = tokio::join!(
-        client.search(query, CATEGORIES[0]),
-        client.search(query, CATEGORIES[1]),
-        client.search(query, CATEGORIES[2]),
-        client.search(query, CATEGORIES[3]),
-        client.search(query, CATEGORIES[4]),
-    );
-
-    let mut sections = Vec::new();
-    for (filter, result) in [
-        (CATEGORIES[0], songs),
-        (CATEGORIES[1], videos),
-        (CATEGORIES[2], albums),
-        (CATEGORIES[3], artists),
-        (CATEGORIES[4], playlists),
     ] {
-        match result {
-            Ok(items) if !items.is_empty() => sections.push(SearchSection { filter, items }),
-            Err(e) => eprintln!("[search] {} failed: {e}", filter.label()),
-            _ => {}
+        let Some(kind) = kind_for_filter(category) else {
+            continue;
+        };
+        let picked: Vec<SearchItem> = items
+            .iter()
+            .filter(|item| item.kind == kind)
+            .cloned()
+            .collect();
+        if !picked.is_empty() {
+            sections.push(SearchSection {
+                filter: category,
+                items: picked,
+            });
         }
     }
     Ok(sections)
@@ -248,6 +262,8 @@ pub struct App {
     view: View,
     /// Search results, grouped by category.
     sections: Vec<SearchSection>,
+    /// The multi-category view, kept so Back can return to it from "See more".
+    prev_sections: Option<Vec<SearchSection>>,
 
     status: Option<String>,
     busy: bool,
@@ -285,6 +301,8 @@ pub struct App {
     thumbnails: HashMap<String, egui::TextureHandle>,
     /// Insertion order of `thumbnails`, for eviction.
     thumb_order: VecDeque<String>,
+    /// Artwork the current view needs, so eviction leaves it alone.
+    wanted_thumbs: HashSet<String>,
     thumb_inflight: HashSet<String>,
     thumb_failed: HashSet<String>,
 }
@@ -384,6 +402,7 @@ impl App {
             theme_applied: false,
             view: View::Search,
             sections: Vec::new(),
+            prev_sections: None,
             status,
             busy: false,
             queue: Vec::new(),
@@ -407,6 +426,7 @@ impl App {
             img_http,
             thumbnails: HashMap::new(),
             thumb_order: VecDeque::new(),
+            wanted_thumbs: HashSet::new(),
             thumb_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
         };
@@ -424,6 +444,14 @@ impl App {
         }
         self.busy = true;
         self.status = Some(format!("Searching “{query}”…"));
+        let previous_filter = self.last_search.as_ref().map(|(_, filter)| *filter);
+        // Drilling into a category keeps the multi-category view for Back.
+        if self.filter != SearchFilter::All && previous_filter == Some(SearchFilter::All) {
+            self.prev_sections = Some(std::mem::take(&mut self.sections));
+        }
+        if self.filter == SearchFilter::All {
+            self.prev_sections = None;
+        }
         self.last_search = Some((query.clone(), self.filter));
         let client = self.client.clone();
         let tx = self.tx.clone();
@@ -1027,12 +1055,22 @@ impl App {
                             let texture =
                                 ctx.load_texture(uri.clone(), image, egui::TextureOptions::LINEAR);
                             self.thumbnails.insert(uri.clone(), texture);
-                            self.thumb_order.push_back(uri);
-                            // Evict the oldest so memory stays bounded.
-                            while self.thumb_order.len() > MAX_THUMBS {
-                                if let Some(oldest) = self.thumb_order.pop_front() {
-                                    self.thumbnails.remove(&oldest);
+                            self.thumb_order.push_back(uri.clone());
+                            // Evict the oldest textures that the current view
+                            // doesn't need, so visible artwork never flickers.
+                            if self.thumb_order.len() > MAX_THUMBS {
+                                let wanted = self.wanted_thumbs.clone();
+                                let mut kept = VecDeque::new();
+                                let mut count = self.thumb_order.len();
+                                while let Some(oldest) = self.thumb_order.pop_front() {
+                                    if count > MAX_THUMBS && !wanted.contains(&oldest) {
+                                        self.thumbnails.remove(&oldest);
+                                        count -= 1;
+                                    } else {
+                                        kept.push_back(oldest);
+                                    }
                                 }
+                                self.thumb_order = kept;
                             }
                         }
                         Err(e) => {
@@ -1094,6 +1132,9 @@ impl App {
                 push(&track.thumbnail);
             }
         }
+
+        // Remember what this view needs so eviction never drops it.
+        self.wanted_thumbs = uris.iter().cloned().collect();
 
         for uri in uris {
             if self.thumb_inflight.len() >= MAX_THUMB_INFLIGHT {
@@ -1209,7 +1250,7 @@ impl App {
                         ui.add_space(10.0);
                         if ui
                             .add_enabled(
-                                !matches!(self.view, View::Search),
+                                !matches!(self.view, View::Search) || self.prev_sections.is_some(),
                                 egui::Button::new("⏴  Back"),
                             )
                             .clicked()
@@ -1290,14 +1331,23 @@ impl App {
         });
 
         if go_back {
-            match self.view_history.pop() {
-                Some((nav, view)) => {
-                    self.nav = nav;
-                    self.view = view;
+            if matches!(self.view, View::Search) && self.prev_sections.is_some() {
+                // Leave an expanded category back to the grouped results.
+                self.sections = self.prev_sections.take().unwrap_or_default();
+                self.filter = SearchFilter::All;
+                if let Some((query, _)) = self.last_search.clone() {
+                    self.query = query;
                 }
-                None => {
-                    self.nav = Nav::Search;
-                    self.view = View::Search;
+            } else {
+                match self.view_history.pop() {
+                    Some((nav, view)) => {
+                        self.nav = nav;
+                        self.view = view;
+                    }
+                    None => {
+                        self.nav = Nav::Search;
+                        self.view = View::Search;
+                    }
                 }
             }
         }
@@ -1392,13 +1442,11 @@ impl App {
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(section.filter.label()).size(18.0).strong());
-                    if section.items.len() > PREVIEW {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("See more").clicked() {
-                                *see_more = Some(section.filter);
-                            }
-                        });
-                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("See more").clicked() {
+                            *see_more = Some(section.filter);
+                        }
+                    });
                 });
                 ui.add_space(4.0);
             }
@@ -1445,17 +1493,20 @@ impl App {
                 (id_prefix, idx),
                 item.thumbnail.as_deref(),
                 &item.title,
-                &item.subtitle,
+                &item.segments,
                 trailing.as_deref(),
                 Some(idx),
                 selected,
                 item.playable(),
                 item.navigable(),
             );
-            if row.hovered() {
+            if let Some(id) = row.link {
+                // An artist/album name inside the row opens that page.
+                *action = Some(Action::Open(id));
+            } else if row.hovered {
                 *hovered = item.to_track();
             }
-            if row.clicked() {
+            if row.clicked {
                 *action = activate(items, idx);
             }
         }
@@ -1475,23 +1526,32 @@ impl App {
             let selected = self.current == Some(idx)
                 && current_video.as_deref() == Some(track.video_id.as_str());
             let trailing = track.duration_text();
+            let mut segments: Vec<(String, Option<String>)> = Vec::new();
+            for (position, artist) in track.artists.iter().enumerate() {
+                if position > 0 {
+                    segments.push((", ".to_string(), None));
+                }
+                segments.push((artist.clone(), track.artist_ids.get(position).cloned()));
+            }
             let row = ui::list_row(
                 ui,
                 &self.thumbnails,
                 ("track", idx),
                 track.thumbnail.as_deref(),
                 &track.title,
-                &track.artist_line(),
+                &segments,
                 trailing.as_deref(),
                 Some(idx),
                 selected,
                 true,
                 false,
             );
-            if row.hovered() {
+            if let Some(id) = row.link {
+                *action = Some(Action::Open(id));
+            } else if row.hovered {
                 *hovered = Some(track.clone());
             }
-            if row.clicked() {
+            if row.clicked {
                 *action = Some(Action::PlayQueueIndex(idx));
             }
         }
