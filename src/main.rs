@@ -346,6 +346,27 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
         println!("   - {} — {}", t.title, t.artist_line());
     }
     println!("shelves: {}", page.shelves.len());
+    // Feeds page in more shelves; mirror that so the dump is representative.
+    let mut token = page.continuation.clone();
+    let mut round = 0;
+    while let Some(t) = token.take() {
+        if round >= 5 {
+            break;
+        }
+        round += 1;
+        match rt.block_on(client.browse_continuation(&t)) {
+            Ok(more) => {
+                for shelf in &more.shelves {
+                    println!("   [{}] {} items", shelf.title, shelf.items.len());
+                }
+                token = more.continuation;
+            }
+            Err(e) => {
+                println!("   (continuation failed: {e})");
+                break;
+            }
+        }
+    }
     for shelf in &page.shelves {
         println!("   [{}] {} items", shelf.title, shelf.items.len());
         for item in shelf.items.iter().take(3) {

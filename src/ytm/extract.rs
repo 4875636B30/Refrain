@@ -418,10 +418,19 @@ pub fn parse_shelves(v: &Value) -> Vec<Shelf> {
             .and_then(|h| h.get("title"))
             .map(text)
             .unwrap_or_default();
-        let items: Vec<SearchItem> = find_renderers(carousel, "musicTwoRowItemRenderer")
+        let mut items: Vec<SearchItem> = find_renderers(carousel, "musicTwoRowItemRenderer")
             .into_iter()
             .filter_map(parse_two_row_item)
             .collect();
+        // Some carousels — e.g. the home page's "Quick picks" — hold list rows
+        // rather than tiles.
+        if items.is_empty() {
+            items = find_renderers(carousel, "musicResponsiveListItemRenderer")
+                .into_iter()
+                .filter_map(parse_track)
+                .map(|track| SearchItem::from_track(&track))
+                .collect();
+        }
         if !items.is_empty() {
             out.push(Shelf { title, items });
         }
@@ -460,6 +469,65 @@ fn friendly_title(browse_id: &str) -> String {
     }
 }
 
+/// Collect the page's main track list, skipping anything inside a carousel
+/// (those become shelves instead).
+fn collect_tracks(v: &Value, out: &mut Vec<Track>) {
+    match v {
+        Value::Object(map) => {
+            for (key, value) in map {
+                // Carousel contents are rendered as shelves.
+                if key == "musicCarouselShelfRenderer" {
+                    continue;
+                }
+                if key == "musicResponsiveListItemRenderer" {
+                    if let Some(track) = parse_track(value) {
+                        out.push(track);
+                    }
+                }
+                collect_tracks(value, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_tracks(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn first_continuation(v: &Value) -> Option<String> {
+    let entries = v.get("continuations")?.as_array()?;
+    for entry in entries {
+        for key in ["nextContinuationData", "reloadContinuationData"] {
+            if let Some(token) = entry
+                .get(key)
+                .and_then(|d| d.get("continuation"))
+                .and_then(Value::as_str)
+            {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The token for loading further shelves (feeds page in as you scroll).
+///
+/// Continuation *responses* use `sectionListContinuation` where the first
+/// response uses `sectionListRenderer`, so accept either.
+pub fn parse_continuation(v: &Value) -> Option<String> {
+    for name in ["sectionListContinuation", "sectionListRenderer"] {
+        for node in find_renderers(v, name) {
+            if let Some(token) = first_continuation(node) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
+/// The token for loading more *tracks* on a playlist/album page.
 fn page_kind(browse_id: &str) -> PageKind {
     if browse_id.starts_with("MPREb") || browse_id.starts_with("MPRE") {
         PageKind::Album
@@ -502,14 +570,14 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         thumbnail = largest_thumbnail(h);
     }
 
-    let tracks: Vec<Track> = find_renderers(v, "musicResponsiveListItemRenderer")
-        .into_iter()
-        .filter_map(parse_track)
-        .collect();
+    let mut tracks: Vec<Track> = Vec::new();
+    collect_tracks(v, &mut tracks);
 
     let shelves = parse_shelves(v);
+    let continuation = parse_continuation(v);
 
     Page {
+        browse_id: browse_id.to_string(),
         kind: page_kind(browse_id),
         title: if title.is_empty() {
             friendly_title(browse_id)
@@ -521,5 +589,6 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         thumbnail: thumbnail.or_else(|| tracks.first().and_then(|t| t.thumbnail.clone())),
         tracks,
         shelves,
+        continuation,
     }
 }

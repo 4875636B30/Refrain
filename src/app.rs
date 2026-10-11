@@ -41,6 +41,11 @@ enum Msg {
         track: Track,
         result: Result<rodio::Decoder<crate::audio::stream::RemoteSource>, String>,
     },
+    /// Further shelves loaded via a continuation token.
+    MoreShelves {
+        browse_id: String,
+        result: Result<crate::ytm::client::MoreShelves, String>,
+    },
     Image {
         uri: String,
         result: Result<egui::ColorImage, String>,
@@ -50,6 +55,9 @@ enum Msg {
 /// Simultaneous artwork downloads. Decoding happens off the UI thread, but this
 /// still avoids a thundering herd right after a page loads.
 const MAX_THUMB_INFLIGHT: usize = 6;
+
+/// How many times we page in more shelves for a feed (home/explore/library).
+const MAX_MORE_ROUNDS: u32 = 5;
 
 /// Artwork is fetched with reqwest (the same stack used for the API) and
 /// uploaded as a texture, rather than relying on egui's built-in HTTP loader.
@@ -151,6 +159,8 @@ pub struct App {
     prefetch_inflight: HashSet<String>,
     /// Debounce state for hover-triggered prefetching.
     hover_target: Option<(String, Instant)>,
+    /// Rounds of continuation loading for the current feed page.
+    more_rounds: u32,
     advance_armed: bool,
 
     audio: Option<AudioEngine>,
@@ -241,6 +251,7 @@ impl App {
             prefetched: None,
             prefetch_inflight: HashSet::new(),
             hover_target: None,
+            more_rounds: 0,
             advance_armed: false,
             audio,
             audio_error,
@@ -390,6 +401,20 @@ impl App {
             .ok();
     }
 
+    fn spawn_more_shelves(&mut self, ctx: &egui::Context, browse_id: String, token: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .browse_continuation(&token)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::MoreShelves { browse_id, result });
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_download(&mut self, ctx: &egui::Context, video_id: String) {
         if !self.downloading.insert(video_id.clone()) {
             return; // already in flight
@@ -513,12 +538,24 @@ impl App {
                     self.current = None;
                     self.advance_armed = false;
                     let first = page.tracks.first().cloned();
+                    // Feeds page in their shelves; album/playlist pages don't.
+                    let next = if page.browse_id.starts_with("FEmusic") {
+                        page.continuation.clone()
+                    } else {
+                        None
+                    };
+                    let browse_id = page.browse_id.clone();
                     self.view = View::Detail(page);
                     self.busy = false;
                     self.status = None;
+                    self.more_rounds = 0;
                     // Warm the first track of the page.
                     if let Some(track) = first {
                         self.prefetch(ctx, &track);
+                    }
+                    if let Some(token) = next {
+                        self.more_rounds = 1;
+                        self.spawn_more_shelves(ctx, browse_id, token);
                     }
                 }
                 Msg::Page(Err(e)) => {
@@ -639,6 +676,24 @@ impl App {
                                 self.spawn_download(ctx, track.video_id);
                             }
                         }
+                    }
+                }
+                Msg::MoreShelves { browse_id, result } => {
+                    let mut next: Option<String> = None;
+                    if let View::Detail(page) = &mut self.view {
+                        if page.browse_id == browse_id {
+                            if let Ok(more) = result {
+                                page.shelves.extend(more.shelves);
+                                page.continuation = more.continuation;
+                                if self.more_rounds < MAX_MORE_ROUNDS {
+                                    next = page.continuation.clone();
+                                }
+                            }
+                        }
+                    }
+                    if let Some(token) = next {
+                        self.more_rounds += 1;
+                        self.spawn_more_shelves(ctx, browse_id, token);
                     }
                 }
                 Msg::Image { uri, result } => {

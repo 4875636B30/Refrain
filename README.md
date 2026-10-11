@@ -39,6 +39,13 @@ parser walks the tree looking for renderer names it recognises
 (`musicResponsiveListItemRenderer`, `musicResponsiveHeaderRenderer`, …). Unknown
 wrappers are simply skipped, so the client keeps working when the layout shifts.
 
+### Feeds
+
+The Home/Explore feeds only return a handful of shelves in the first response —
+the rest arrive as you scroll, via continuation tokens. The client pages those
+in automatically (up to a few rounds), so Home ends up with the same shelves the
+real YouTube Music home shows rather than just the first three.
+
 ### Playback & streaming
 
 Pressing play runs `yt-dlp -f bestaudio[ext=m4a] -o -` and reads the media from
@@ -183,6 +190,8 @@ Verified working:
       (incl. Flatpak), with automatic keyring selection, plus `cookies.txt` import
 - [x] `SAPISIDHASH`-authenticated InnerTube requests
 - [x] Library and Home feeds
+- [x] Feed shelves paged in via continuations (Home shows the full set, not just
+      the first three)
 - [x] Artwork fetched and decoded off the UI thread (no window freezes)
 
 When several browsers are present, `auto` picks the first one that actually has

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::auth::CookieJar;
 
-use super::domain::{Page, SearchItem};
+use super::domain::{Page, SearchItem, Shelf};
 use super::extract;
 
 const ENDPOINT_BASE: &str = "https://music.youtube.com/youtubei/v1";
@@ -211,4 +211,20 @@ impl Client {
         let value = self.post("browse", body).await?;
         Ok(extract::parse_page(browse_id, &value))
     }
+
+    /// Page in further shelves (the home/explore feeds load this way).
+    pub async fn browse_continuation(&self, token: &str) -> Result<MoreShelves> {
+        let body = json!({ "continuation": token });
+        let value = self.post("browse", body).await?;
+        Ok(MoreShelves {
+            shelves: extract::parse_shelves(&value),
+            continuation: extract::parse_continuation(&value),
+        })
+    }
+}
+
+/// Extra shelves returned by a continuation request.
+pub struct MoreShelves {
+    pub shelves: Vec<Shelf>,
+    pub continuation: Option<String>,
 }

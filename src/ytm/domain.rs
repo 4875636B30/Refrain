@@ -62,6 +62,7 @@ pub struct Shelf {
 /// A fully-resolved detail page (album, playlist, artist).
 #[derive(Clone, Debug)]
 pub struct Page {
+    pub browse_id: String,
     pub kind: PageKind,
     pub title: String,
     pub subtitle: String,
@@ -69,6 +70,8 @@ pub struct Page {
     pub thumbnail: Option<String>,
     pub tracks: Vec<Track>,
     pub shelves: Vec<Shelf>,
+    /// Token for loading further shelves (the home/explore feeds page in).
+    pub continuation: Option<String>,
 }
 
 /// Classification of a single search result row.
@@ -131,5 +134,19 @@ impl SearchItem {
             duration_secs: self.duration_secs,
             thumbnail: self.thumbnail.clone(),
         })
+    }
+
+    /// Present a playable track as a grid/search item.
+    pub fn from_track(track: &Track) -> Self {
+        Self {
+            title: track.title.clone(),
+            artists: track.artists.clone(),
+            subtitle: track.artist_line(),
+            kind: ItemKind::Song,
+            browse_id: None,
+            video_id: Some(track.video_id.clone()),
+            thumbnail: track.thumbnail.clone(),
+            duration_secs: track.duration_secs,
+        }
     }
 }
