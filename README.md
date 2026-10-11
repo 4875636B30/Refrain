@@ -100,6 +100,15 @@ tries `GNOMEKEYRING`, `KWALLET6`, `KWALLET` and `BASICTEXT` explicitly, keeps
 whichever yields a `SAPISID`, and remembers it. Pin one with the `keyring`
 config option if you prefer.
 
+Extraction takes ~10 s of `yt-dlp`, so the dumped jar is **cached** and reused
+for 45 minutes, and InnerTube is used to verify the cached session still works —
+a rejected jar triggers a fresh extraction. That makes sign-in ready in well
+under a second on subsequent launches. To force a re-extract:
+
+```sh
+cargo run -- --auth-check --refresh
+```
+
 ## Requirements
 
 - Rust (stable)

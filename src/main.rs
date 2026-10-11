@@ -12,6 +12,10 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--auth-check") {
+        if args.iter().any(|a| a == "--refresh") {
+            auth::clear_cache();
+            println!("cleared cached cookies (they will be re-extracted)\n");
+        }
         if let Err(e) = auth_check() {
             eprintln!("auth-check failed: {e:#}");
             std::process::exit(1);

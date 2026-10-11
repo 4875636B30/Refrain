@@ -315,13 +315,49 @@ async fn try_source(source: &AuthConfig) -> Option<ResolvedAuth> {
     fallback
 }
 
-/// Resolve cookies according to the config.
-///
-/// In `auto` mode we try each detected browser and prefer one that actually has
-/// a YouTube session. An explicitly configured browser is honoured, but if it
-/// yields no YouTube session we look for a better option rather than silently
-/// leaving the user anonymous.
+/// How long a dumped cookie jar is reused before re-extracting from the browser.
+/// Extraction costs ~10s of `yt-dlp`, so this is the difference between an
+/// instant start and a slow one.
+const COOKIE_TTL: std::time::Duration = std::time::Duration::from_secs(45 * 60);
+
+/// Recently dumped cookies, if any, avoiding a slow re-extraction.
+fn cached_cookies() -> Option<Vec<Cookie>> {
+    let path = cookies_file_path();
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if modified.elapsed().ok()? > COOKIE_TTL {
+        return None;
+    }
+    let cookies = parse_netscape(&std::fs::read_to_string(&path).ok()?);
+    (!cookies.is_empty()).then_some(cookies)
+}
+
+/// Drop the cached cookie jar (and remembered source), forcing re-extraction.
+pub fn clear_cache() {
+    let _ = std::fs::remove_file(cookies_file_path());
+    let _ = std::fs::remove_file(source_cache_path());
+}
+
+/// Resolve cookies according to the config, reusing a recent extraction.
 pub async fn resolve(config: &Config) -> Result<Option<ResolvedAuth>> {
+    // Fast path: a fresh jar plus a remembered source means no yt-dlp at all.
+    if !matches!(config.auth.mode, AuthMode::None | AuthMode::File)
+        && let (Some(source), Some(cookies)) = (cached_source(), cached_cookies())
+    {
+        return Ok(Some(ResolvedAuth {
+            source,
+            jar: CookieJar::new(cookies),
+        }));
+    }
+    resolve_uncached(config).await
+}
+
+/// Resolve ignoring any cached jar (used when the cached one stops working).
+pub async fn resolve_fresh(config: &Config) -> Result<Option<ResolvedAuth>> {
+    let _ = std::fs::remove_file(cookies_file_path());
+    resolve_uncached(config).await
+}
+
+async fn resolve_uncached(config: &Config) -> Result<Option<ResolvedAuth>> {
     match config.auth.mode {
         AuthMode::None => Ok(None),
         AuthMode::File => {

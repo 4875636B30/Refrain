@@ -338,7 +338,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
             visuals.widgets.inactive.bg_stroke.color,
         ))
         .corner_radius(egui::CornerRadius::same(15))
-        .inner_margin(egui::Margin::symmetric(12, 4));
+        .inner_margin(egui::Margin::symmetric(12, 3));
 
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {

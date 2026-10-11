@@ -162,8 +162,8 @@ pub struct App {
     current: Option<usize>,
     pending_play: Option<Track>,
     downloading: HashSet<String>,
-    /// A stream opened ahead of the click; only one at a time.
-    prefetched: Option<PrefetchedStream>,
+    /// Streams opened ahead of the click (most recent last).
+    prefetched: Vec<PrefetchedStream>,
     prefetch_inflight: HashSet<String>,
     /// Debounce state for hover-triggered prefetching.
     hover_target: Option<(String, Instant)>,
@@ -176,6 +176,8 @@ pub struct App {
     audio: Option<AudioEngine>,
     audio_error: Option<String>,
     volume: f32,
+    /// Last non-zero volume, for the mute toggle.
+    last_volume: f32,
 
     img_http: reqwest::Client,
     thumbnails: HashMap<String, egui::TextureHandle>,
@@ -221,11 +223,36 @@ impl App {
             let tx = tx.clone();
             let ctx = cc.egui_ctx.clone();
             rt.spawn(async move {
-                eprintln!(
-                    "[auth] resolving: mode={:?} browser={:?} profile={:?}",
-                    cfg.auth.mode, cfg.auth.browser, cfg.auth.profile
-                );
-                let result = crate::auth::resolve(&cfg).await.map_err(|e| e.to_string());
+                let started = std::time::Instant::now();
+                let mut resolved = crate::auth::resolve(&cfg).await;
+
+                // A reused jar is only trusted if InnerTube still accepts it.
+                let stale = match &resolved {
+                    Ok(Some(auth)) => {
+                        match crate::ytm::Client::new("en", "US", Some(auth.jar.clone())) {
+                            Ok(probe) => !probe.logged_in().await.unwrap_or(false),
+                            Err(_) => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if stale {
+                    eprintln!("[auth] cached cookies rejected — re-extracting");
+                    if let Ok(Some(fresh)) = crate::auth::resolve_fresh(&cfg).await {
+                        resolved = Ok(Some(fresh));
+                    }
+                }
+                match &resolved {
+                    Ok(Some(auth)) => eprintln!(
+                        "[auth] ready in {:?} via {} (session={})",
+                        started.elapsed(),
+                        auth.source.browser,
+                        auth.jar.has_youtube_session()
+                    ),
+                    Ok(None) => eprintln!("[auth] none in {:?}", started.elapsed()),
+                    Err(e) => eprintln!("[auth] failed in {:?}: {e}", started.elapsed()),
+                }
+                let result = resolved.map_err(|e| e.to_string());
                 let _ = tx.send(Msg::Auth(result));
                 ctx.request_repaint();
             });
@@ -259,7 +286,7 @@ impl App {
             current: None,
             pending_play: None,
             downloading: HashSet::new(),
-            prefetched: None,
+            prefetched: Vec::new(),
             prefetch_inflight: HashSet::new(),
             hover_target: None,
             more_rounds: 0,
@@ -268,6 +295,7 @@ impl App {
             audio,
             audio_error,
             volume,
+            last_volume: if volume > 0.001 { volume } else { 0.8 },
             img_http,
             thumbnails: HashMap::new(),
             thumb_inflight: HashSet::new(),
@@ -345,7 +373,7 @@ impl App {
         if resolver::cache_path(&video_id).exists() {
             return; // already on disk, so playback is instant anyway
         }
-        if self.prefetched.as_ref().is_some_and(|p| p.video_id == video_id)
+        if self.prefetched.iter().any(|p| p.video_id == video_id)
             || self.prefetch_inflight.contains(&video_id)
             || self
                 .pending_play
@@ -386,7 +414,7 @@ impl App {
         };
         match &self.hover_target {
             Some((video_id, since)) if video_id == &track.video_id => {
-                if since.elapsed() >= Duration::from_millis(250) {
+                if since.elapsed() >= Duration::from_millis(150) {
                     self.prefetch(ctx, &track);
                 }
             }
@@ -466,13 +494,13 @@ impl App {
         if path.exists() {
             self.pending_play = None;
             self.play_path(&path, track);
-        } else if self
+        } else if let Some(index) = self
             .prefetched
-            .as_ref()
-            .is_some_and(|p| p.video_id == track.video_id)
+            .iter()
+            .position(|p| p.video_id == track.video_id)
         {
             // Opened while hovering / when the page loaded: play immediately.
-            let prepared = self.prefetched.take().expect("checked above");
+            let prepared = self.prefetched.remove(index);
             self.play_decoder(prepared.decoder, track);
         } else if self.prefetch_inflight.contains(&track.video_id) {
             // Already opening for this very track — just wait for it.
@@ -540,9 +568,14 @@ impl App {
                     self.status = None;
                     self.view = View::Search;
                     self.nav = Nav::Search;
-                    // Warm the likely first click.
-                    if let Some(track) = self.results.iter().find_map(|item| item.to_track()) {
-                        self.prefetch(ctx, &track);
+                    let warm: Vec<Track> = self
+                        .results
+                        .iter()
+                        .filter_map(|item| item.to_track())
+                        .take(2)
+                        .collect();
+                    for track in &warm {
+                        self.prefetch(ctx, track);
                     }
                 }
                 Msg::Search(Err(e)) => {
@@ -553,7 +586,7 @@ impl App {
                     self.queue = page.tracks.clone();
                     self.current = None;
                     self.advance_armed = false;
-                    let first = page.tracks.first().cloned();
+                    let warm: Vec<Track> = page.tracks.iter().take(2).cloned().collect();
                     // Feeds page in their shelves; album/playlist pages don't.
                     let next = if page.browse_id.starts_with("FEmusic") {
                         page.continuation.clone()
@@ -565,9 +598,9 @@ impl App {
                     self.busy = false;
                     self.status = None;
                     self.more_rounds = 0;
-                    // Warm the first track of the page.
-                    if let Some(track) = first {
-                        self.prefetch(ctx, &track);
+                    // Warm the first couple of tracks of the page.
+                    for track in &warm {
+                        self.prefetch(ctx, track);
                     }
                     if let Some(token) = next {
                         self.more_rounds = 1;
@@ -696,12 +729,15 @@ impl App {
                             self.play_decoder(decoder, track);
                         }
                         Ok(decoder) => {
-                            // Hold only the most recent prefetched stream;
-                            // dropping the previous one stops its yt-dlp process.
-                            self.prefetched = Some(PrefetchedStream {
+                            self.prefetched.push(PrefetchedStream {
                                 video_id: track.video_id,
                                 decoder,
                             });
+                            // Hold only the two most recent; dropping one stops
+                            // its yt-dlp process.
+                            while self.prefetched.len() > 2 {
+                                self.prefetched.remove(0);
+                            }
                         }
                         Err(e) => {
                             if is_pending {
@@ -848,17 +884,6 @@ impl App {
                 ui.separator();
                 ui.add_space(8.0);
 
-                let theme_label = if self.theme_light {
-                    "☾   Dark theme"
-                } else {
-                    "☀   Light theme"
-                };
-                if ui.button(theme_label).clicked() {
-                    self.theme_light = !self.theme_light;
-                    self.theme_applied = false;
-                    self.save_ui_settings();
-                }
-
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                     ui.add_space(12.0);
                     if let Some(msg) = &self.status {
@@ -899,25 +924,26 @@ impl App {
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                // A single interactive height keeps every control level.
+                ui.spacing_mut().interact_size.y = 30.0;
                 ui.add_space(8.0);
                 if ui
                     .add_enabled(
                         !matches!(self.view, View::Search),
-                        egui::Button::new("⏴  Back").min_size(egui::vec2(0.0, 30.0)),
+                        egui::Button::new("⏴  Back"),
                     )
                     .clicked()
                 {
                     go_back = true;
                 }
                 ui.add_space(4.0);
-                // Centre the search cluster in the space that's left.
+                // Centre the search cluster, leaving room for the settings icon.
                 let cluster = 360.0 + 46.0 + 140.0 + 90.0 + 24.0;
-                ui.add_space(((ui.available_width() - cluster) / 2.0).max(0.0));
+                ui.add_space(((ui.available_width() - 44.0 - cluster) / 2.0).max(0.0));
                 if ui::search_bar(ui, &mut self.query, 360.0) {
                     do_search = true;
                 }
-
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 egui::ComboBox::from_id_salt("search_filter")
                     .width(132.0)
                     .selected_text(self.filter.label())
@@ -926,16 +952,38 @@ impl App {
                             ui.selectable_value(&mut self.filter, option, option.label());
                         }
                     });
-
-                if ui
-                    .add_sized([90.0, 30.0], egui::Button::new("Search"))
-                    .clicked()
-                {
+                if ui.button("Search").clicked() {
                     do_search = true;
                 }
-                if self.busy {
-                    ui.spinner();
-                }
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.menu_button("⚙", |ui| {
+                        let theme_label = if self.theme_light {
+                            "☾  Dark theme"
+                        } else {
+                            "☀  Light theme"
+                        };
+                        if ui.button(theme_label).clicked() {
+                            self.theme_light = !self.theme_light;
+                            self.theme_applied = false;
+                            self.save_ui_settings();
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.label(
+                            RichText::new(if self.authenticated {
+                                "signed in"
+                            } else {
+                                "anonymous"
+                            })
+                            .small()
+                            .weak(),
+                        );
+                    });
+                    if self.busy {
+                        ui.spinner();
+                    }
+                });
             });
             ui.add_space(6.0);
         });
@@ -1188,12 +1236,20 @@ impl App {
                         egui::vec2(ui.available_width(), row_height),
                         Layout::right_to_left(Align::Center),
                         |ui| {
-                            ui.add_sized(
-                                egui::vec2(110.0, 16.0),
-                                egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(116.0, 16.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    if let Some(v) = ui::progress_bar(ui, volume, 1.0) {
+                                        volume = v;
+                                    }
+                                },
                             );
-                            ui.add_space(4.0);
-                            ui.label(RichText::new("🔊").weak());
+                            ui.add_space(6.0);
+                            let muted = volume <= 0.001;
+                            if ui.button(if muted { "🔇" } else { "🔊" }).clicked() {
+                                volume = if muted { self.last_volume } else { 0.0 };
+                            }
                         },
                     );
                 });
@@ -1221,6 +1277,9 @@ impl App {
             });
 
         self.volume = volume;
+        if volume > 0.001 {
+            self.last_volume = volume;
+        }
         if let Some(audio) = self.audio.as_mut() {
             audio.set_volume(volume);
         }
