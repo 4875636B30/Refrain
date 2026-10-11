@@ -1,0 +1,89 @@
+name: Release
+
+# Tag a commit (`git tag v0.1.0 && git push --tags`) to publish a bundle, or run
+# this by hand from the Actions tab to test it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Native deps for rodio (ALSA) and eframe/winit (X11 + Wayland). No D-Bus
+      # headers: the media controls use zbus, which is pure Rust.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # Shipped beside the binary, which is the second place the resolver looks.
+      # Deliberately whatever upstream currently calls latest: yt-dlp breaks
+      # whenever YouTube changes, and a pinned copy would rot between releases.
+      - name: Fetch yt-dlp
+        run: |
+          set -euo pipefail
+          curl -fsSL -o yt-dlp_linux \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
+          chmod +x yt-dlp_linux
+          ./yt-dlp_linux --version
+
+      - name: Assemble the bundle
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="refrain-${version}-linux-x86_64"
+          mkdir -p "dist/${name}"
+          cp target/release/refrain "dist/${name}/"
+          cp yt-dlp_linux "dist/${name}/"
+          cp packaging/refrain.desktop packaging/refrain.metainfo.xml \
+             packaging/refrain.svg "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
+          tar -C dist -czf "${name}.tar.gz" "${name}"
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Verify the bundle runs
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tar -xzf "refrain-${version}-linux-x86_64.tar.gz"
+          # A GUI needs a display, but the diagnostics do not: this proves the
+          # binary starts and finds the yt-dlp shipped next to it.
+          ./refrain-${version}-linux-x86_64/refrain --probe "daft punk" | head -5
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            *.tar.gz
+            *.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            Built for Linux x86_64. Unpack and run `refrain`.
+
+            The bundle contains `yt-dlp_linux` next to the binary, which is where
+            the app looks for it first.
+
+            `ffmpeg` is a runtime dependency, but only for the fallback that
+            transcodes a stream the fast path could not use — install it if you
+            hit tracks that refuse to play.

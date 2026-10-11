@@ -110,6 +110,40 @@ distribution possible:
 A release bundle is therefore the binary plus `yt-dlp_linux`, plus `ffmpeg`
 (needed only for the download fallback).
 
+Tagging a commit (`git tag v0.1.0 && git push --tags`) runs
+`.github/workflows/release.yml`, which builds with `--locked`, fetches the
+current `yt-dlp_linux`, assembles the bundle, checks that the unpacked binary
+still resolves a track, and attaches it to a GitHub release. The bundle is about
+50 MB, most of it `yt-dlp`.
+
+```
+refrain-<version>-linux-x86_64/
+  refrain              the app
+  yt-dlp_linux         found next to the binary
+  refrain.desktop      launcher entry
+  refrain.svg          icon
+  refrain.metainfo.xml AppStream metadata
+  README.md  LICENSE
+```
+
+To install it for the current user:
+
+```sh
+tar xzf refrain-*-linux-x86_64.tar.gz
+cd refrain-*-linux-x86_64
+install -Dm755 refrain ~/.local/bin/refrain
+install -Dm644 refrain.svg ~/.local/share/icons/hicolor/scalable/apps/refrain.svg
+install -Dm644 refrain.desktop ~/.local/share/applications/refrain.desktop
+install -Dm644 refrain.metainfo.xml ~/.local/share/metainfo/refrain.metainfo.xml
+# yt-dlp must sit next to the binary for the bundle to be self-contained:
+cp yt-dlp_linux ~/.local/bin/yt-dlp_linux
+```
+
+`packaging/refrain.metainfo.xml` carries placeholder `example` URLs and a
+placeholder reverse-DNS id — replace both with the project's real home before
+publishing. `desktop-file-validate` and `appstreamcli validate` both pass as
+they stand.
+
 ### UI
 
 A sidebar (Home / Search / Library) with cover-art grids for albums, artists and
@@ -241,6 +275,8 @@ Verified working:
       playing or in flight)
 - [x] Thumbs up / down, read from the watch-next response and written back
       through InnerTube's `like` endpoints (signed in)
+- [x] Desktop media controls (MPRIS, media keys, `playerctl`), via souvlaki
+- [x] Release bundle with `yt-dlp` shipped beside the binary
 - [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family
       (incl. Flatpak), with automatic keyring selection, plus `cookies.txt` import

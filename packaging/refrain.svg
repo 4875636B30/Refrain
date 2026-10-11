@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Refrain's application icon.
+
+  Deliberately not YouTube's play-button mark: the project name and identity are
+  its own, and the play glyph is YouTube's trademark. A single note in the brand
+  red reads clearly at 16px and is ours.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Refrain">
+  <rect width="128" height="128" rx="28" ry="28" fill="#ff0000"/>
+  <g fill="#ffffff">
+    <!-- Note head, tilted like a real eighth note. -->
+    <ellipse cx="49" cy="93" rx="17" ry="12" transform="rotate(-20 49 93)"/>
+    <!-- Stem, overlapping the head's right edge. -->
+    <rect x="62" y="32" width="8" height="62"/>
+    <!-- Flag, sweeping right and down from the stem's top. -->
+    <path d="M70 32c18 6 28 18 26 36-4-14-12-23-26-27z"/>
+  </g>
+</svg>

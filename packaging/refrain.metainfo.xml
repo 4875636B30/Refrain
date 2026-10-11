@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata, so software centres can describe and install the app.
+
+  NOTE: the id and homepage below are placeholders. Replace `example` with the
+  GitHub account the project is published under, in both places, before
+  releasing — the id must be reverse-DNS for the project's real home.
+-->
+<component type="desktop-application">
+  <id>io.github.example.Refrain</id>
+
+  <name>Refrain</name>
+  <summary>Fast, low-memory client for YouTube Music</summary>
+
+  <developer id="io.github.example">
+    <name>example</name>
+  </developer>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      Refrain is a desktop client for YouTube Music, written in Rust. It browses
+      anonymously, or signs in using the browser cookies you already have — no
+      separate login and no web view.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Search organised into songs, videos, albums, artists and playlists</li>
+      <li>Home and library feeds, plus album, playlist and artist pages</li>
+      <li>Streaming playback with a disk cache, so replays start instantly</li>
+      <li>Thumbs up and down, shuffle, repeat and an "Up next" queue</li>
+      <li>Desktop media controls: media keys, the panel widget and playerctl</li>
+      <li>Light and dark themes, and keyboard shortcuts</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">refrain.desktop</launchable>
+
+  <url type="homepage">https://github.com/example/refrain</url>
+  <url type="bugtracker">https://github.com/example/refrain/issues</url>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+
+  <provides>
+    <binary>refrain</binary>
+  </provides>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-11">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

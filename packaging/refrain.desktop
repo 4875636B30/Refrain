@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Refrain
+GenericName=Music Player
+Comment=Fast, low-memory client for YouTube Music
+Exec=refrain
+Icon=refrain
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;youtube;audio;player;streaming;
+StartupNotify=true
+# Must match the WM class the window sets, or the launcher shows a second
+# unnamed entry while the app is running.
+StartupWMClass=refrain
