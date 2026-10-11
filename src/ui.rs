@@ -277,6 +277,10 @@ pub fn list_row(
                         // The parts carry their own separators, so don't add
                         // extra spacing between them.
                         ui.spacing_mut().item_spacing.x = 0.0;
+                        // Linked names read as ordinary text — not the accent
+                        // colour — but still respond to clicks.
+                        let weak = ui.visuals().weak_text_color();
+                        ui.visuals_mut().hyperlink_color = weak;
                         for (text, target) in segments {
                             match target {
                                 Some(browse_id) => {
@@ -322,9 +326,9 @@ fn cover_tile(
     selected: bool,
 ) -> egui::Response {
     let art = width - 10.0;
-    // Square art plus one line each for title and subtitle. A fixed height keeps
-    // rows aligned however long the text is.
-    let height = art + 46.0;
+    // Square art plus one line each for title and subtitle, with room for the
+    // tile's own padding so nothing overflows the highlight.
+    let height = art + 52.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let hovered = response.hovered();
     if selected {
@@ -382,6 +386,10 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
 
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
+            // Don't inherit the toolbar's minimum control height, otherwise the
+            // pill ends up taller than the buttons beside it and nothing lines
+            // up vertically.
+            ui.spacing_mut().interact_size.y = 0.0;
             ui.label(RichText::new("🔍").weak());
             let edit = ui.add(
                 egui::TextEdit::singleline(query)
