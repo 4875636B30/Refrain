@@ -388,10 +388,12 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
         .flatten()
         .map(|r| r.jar);
     let client = ytm::Client::new("en", "US", jar)?;
-    let page = rt.block_on(client.browse(browse_id))?;
+    let mut page = rt.block_on(client.browse(browse_id))?;
 
     println!("{:?} | {} | {}", page.kind, page.title, page.subtitle);
     println!("tracks: {}", page.tracks.len());
+    println!("track count (header): {:?}", page.track_count);
+    println!("has more tracks: {}", page.has_more_tracks());
     for t in page.tracks.iter().take(3) {
         println!("   - {} — {}", t.title, t.artist_line());
     }
@@ -417,6 +419,48 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
             }
         }
     }
+
+    // Long playlists cap their first response at 100 tracks; page the rest in
+    // through the player panel, exactly as the app's "Load more" does.
+    if page.has_more_tracks()
+        && let Some(playlist_id) = page.playlist_id.clone()
+    {
+        for round in 0..10 {
+            let Some(anchor) = page.tracks.last().map(|track| track.video_id.clone()) else {
+                break;
+            };
+            match rt.block_on(client.playlist_more(&anchor, &playlist_id)) {
+                Ok(tracks) => {
+                    let known: std::collections::HashSet<String> =
+                        page.tracks.iter().map(|t| t.video_id.clone()).collect();
+                    let window = tracks.len();
+                    let fresh: Vec<_> = tracks
+                        .into_iter()
+                        .filter(|track| !known.contains(&track.video_id))
+                        .collect();
+                    println!(
+                        "   (panel round {}: anchor={} window={} fresh={})",
+                        round + 1,
+                        &anchor[..6.min(anchor.len())],
+                        window,
+                        fresh.len()
+                    );
+                    if fresh.is_empty() {
+                        break;
+                    }
+                    page.tracks.extend(fresh);
+                    if !page.has_more_tracks() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("   (panel failed: {e})");
+                    break;
+                }
+            }
+        }
+    }
+
     for shelf in &page.shelves {
         println!("   [{}] {} items", shelf.title, shelf.items.len());
         for item in shelf.items.iter().take(3) {

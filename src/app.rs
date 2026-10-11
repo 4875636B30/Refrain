@@ -46,6 +46,11 @@ enum Msg {
         browse_id: String,
         result: Result<crate::ytm::client::MoreShelves, String>,
     },
+    /// Further tracks loaded for a long playlist.
+    MoreTracks {
+        browse_id: String,
+        result: Result<Vec<Track>, String>,
+    },
     /// The account's listening history, used to warm likely tracks.
     History(Result<Vec<Track>, String>),
     Image {
@@ -61,6 +66,9 @@ const MAX_THUMB_INFLIGHT: usize = 6;
 /// How many times we page in more shelves for a feed (home/explore/library).
 const MAX_MORE_ROUNDS: u32 = 5;
 
+/// Rounds when paging the rest of a long playlist (~50 tracks each).
+const MAX_TRACK_ROUNDS: u32 = 10;
+
 /// Artwork textures kept in memory (~160x160 px each). Feeds list many covers,
 /// so this bounds growth as the user browses.
 const MAX_THUMBS: usize = 200;
@@ -69,6 +77,9 @@ const MAX_THUMBS: usize = 200;
 /// uploaded as a texture, rather than relying on egui's built-in HTTP loader.
 const IMAGE_UA: &str = thumbs::USER_AGENT;
 
+// `Page` is a few hundred bytes; boxing it would churn every match site for no
+// real benefit, and only one page is held at a time.
+#[allow(clippy::large_enum_variant)]
 enum View {
     Search,
     Detail(Page),
@@ -84,6 +95,8 @@ enum Action {
         tracks: Vec<Track>,
         index: usize,
     },
+    /// Page in the rest of a long track list.
+    LoadMoreTracks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +296,8 @@ pub struct App {
     hover_target: Option<(String, Instant)>,
     /// Rounds of continuation loading for the current feed page.
     more_rounds: u32,
+    /// Rounds of playlist paging for the current page.
+    track_rounds: u32,
     /// Visited views, so Back returns where the user came from.
     view_history: Vec<(Nav, View)>,
     /// Whether the home feed still needs reloading now that we're signed in.
@@ -415,6 +430,7 @@ impl App {
             prefetch_inflight: HashSet::new(),
             hover_target: None,
             more_rounds: 0,
+            track_rounds: 0,
             view_history: Vec::new(),
             home_needs_reload: false,
             advance_armed: false,
@@ -639,6 +655,27 @@ impl App {
             .ok();
     }
 
+    fn spawn_more_tracks(
+        &mut self,
+        ctx: &egui::Context,
+        browse_id: String,
+        playlist_id: String,
+        anchor_video_id: String,
+    ) {
+        self.busy = true;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .playlist_more(&anchor_video_id, &playlist_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::MoreTracks { browse_id, result });
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_more_shelves(&mut self, ctx: &egui::Context, browse_id: String, token: String) {
         let client = self.client.clone();
         let tx = self.tx.clone();
@@ -759,6 +796,15 @@ impl App {
             Action::PlayList { tracks, index } => {
                 self.queue = tracks;
                 self.play_index(ctx, index);
+            }
+            Action::LoadMoreTracks => {
+                if let View::Detail(page) = &self.view
+                    && let Some(playlist_id) = page.playlist_id.clone()
+                    && let Some(anchor) = page.tracks.last().map(|track| track.video_id.clone())
+                {
+                    self.track_rounds = 0;
+                    self.spawn_more_tracks(ctx, page.browse_id.clone(), playlist_id, anchor);
+                }
             }
         }
     }
@@ -1046,6 +1092,40 @@ impl App {
                 }
                 Msg::History(Err(e)) => {
                     eprintln!("[history] unavailable: {e}");
+                }
+                Msg::MoreTracks { browse_id, result } => {
+                    self.busy = false;
+                    let mut next_anchor = None;
+                    if let View::Detail(page) = &mut self.view
+                        && page.browse_id == browse_id
+                        && let Ok(tracks) = result
+                    {
+                        let known: std::collections::HashSet<String> =
+                            page.tracks.iter().map(|t| t.video_id.clone()).collect();
+                        let fresh: Vec<Track> = tracks
+                            .into_iter()
+                            .filter(|track| !known.contains(&track.video_id))
+                            .collect();
+                        let gained = !fresh.is_empty();
+                        page.tracks.extend(fresh.iter().cloned());
+                        self.queue.extend(fresh);
+                        // One window adds ~50 tracks, so keep going until the
+                        // playlist is complete.
+                        if gained
+                            && self.track_rounds < MAX_TRACK_ROUNDS
+                            && page.has_more_tracks()
+                            && let (Some(playlist_id), Some(anchor)) = (
+                                page.playlist_id.clone(),
+                                page.tracks.last().map(|t| t.video_id.clone()),
+                            )
+                        {
+                            self.track_rounds += 1;
+                            next_anchor = Some((browse_id.clone(), playlist_id, anchor));
+                        }
+                    }
+                    if let Some((browse_id, playlist_id, anchor)) = next_anchor {
+                        self.spawn_more_tracks(ctx, browse_id, playlist_id, anchor);
+                    }
                 }
                 Msg::Image { uri, result } => {
                     self.thumb_inflight.remove(&uri);
@@ -1552,6 +1632,28 @@ impl App {
             if row.clicked {
                 *action = Some(Action::PlayQueueIndex(idx));
             }
+        }
+
+        // Long playlists cap at 100 tracks in the page response.
+        if page.has_more_tracks() {
+            ui.add_space(8.0);
+            let remaining = page
+                .track_count
+                .map(|total| total.saturating_sub(page.tracks.len()))
+                .unwrap_or(0);
+            ui.vertical_centered(|ui| {
+                let label = if remaining > 0 {
+                    format!("Load {remaining} more tracks")
+                } else {
+                    "Load more tracks".to_string()
+                };
+                if ui
+                    .add(egui::Button::new(label).min_size(egui::vec2(200.0, 30.0)))
+                    .clicked()
+                {
+                    *action = Some(Action::LoadMoreTracks);
+                }
+            });
         }
 
         // Browsable carousels (artist albums, related, the home feed…).

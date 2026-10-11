@@ -74,6 +74,17 @@ pub struct Page {
     pub shelves: Vec<Shelf>,
     /// Token for loading further shelves (the home/explore feeds page in).
     pub continuation: Option<String>,
+    /// How many tracks the page claims to have, if it says.
+    pub track_count: Option<usize>,
+    /// Raw playlist id, for paging long track lists via the player panel.
+    pub playlist_id: Option<String>,
+}
+
+impl Page {
+    /// Whether the page is showing fewer tracks than it has.
+    pub fn has_more_tracks(&self) -> bool {
+        self.playlist_id.is_some() && self.track_count.is_some_and(|n| n > self.tracks.len())
+    }
 }
 
 /// Classification of a single search result row.

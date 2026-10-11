@@ -521,7 +521,7 @@ fn friendly_title(browse_id: &str) -> String {
 
 /// Collect the page's main track list, skipping anything inside a carousel
 /// (those become shelves instead).
-fn collect_tracks(v: &Value, out: &mut Vec<Track>) {
+pub fn collect_tracks(v: &Value, out: &mut Vec<Track>) {
     match v {
         Value::Object(map) => {
             for (key, value) in map {
@@ -577,7 +577,64 @@ pub fn parse_continuation(v: &Value) -> Option<String> {
     None
 }
 
-/// The token for loading more *tracks* on a playlist/album page.
+/// Number of tracks a page claims to have, read from its header
+/// (e.g. "243 tracks • 15 hours").
+fn parse_track_count(header: &Value) -> Option<usize> {
+    for key in ["secondSubtitle", "subtitle"] {
+        let Some(node) = header.get(key) else {
+            continue;
+        };
+        // e.g. "9.6K views • 243 tracks • 16+ hours"
+        for part in text(node).to_lowercase().split(['•', ',', '|']) {
+            let part = part.trim();
+            if !(part.contains("track") || part.contains("song")) {
+                continue;
+            }
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(count) = digits.parse() {
+                return Some(count);
+            }
+        }
+    }
+    None
+}
+
+/// The raw playlist id for the player-panel endpoint, when this page is a real
+/// playlist (`VLRDCLAK5uy_…` / `VLPL…`) rather than a collection like `VLLM`.
+pub fn parse_playlist_id(browse_id: &str) -> Option<String> {
+    let rest = browse_id.strip_prefix("VL")?;
+    (rest.starts_with("PL") || rest.starts_with("RD") || rest.starts_with("LA"))
+        .then(|| rest.to_string())
+}
+
+/// Tracks from a `next` (player panel) response, used to page in the rest of a
+/// long playlist.
+pub fn parse_panel_tracks(v: &Value) -> Vec<Track> {
+    find_renderers(v, "playlistPanelVideoRenderer")
+        .into_iter()
+        .filter_map(|item| {
+            let video_id = item.get("videoId").and_then(Value::as_str)?.to_string();
+            let title = item.get("title").map(text).unwrap_or_default();
+            if title.is_empty() {
+                return None;
+            }
+            let byline = item.get("longBylineText").map(runs_of).unwrap_or_default();
+            Some(Track {
+                video_id,
+                title,
+                artists: artists_from_runs(&byline),
+                artist_ids: artist_ids_from_runs(&byline),
+                album: album_from_runs(&byline),
+                duration_secs: item
+                    .get("lengthText")
+                    .map(text)
+                    .and_then(|length| parse_duration(&length)),
+                thumbnail: thumbnail_for(item, THUMBNAIL_TARGET),
+            })
+        })
+        .collect()
+}
+
 fn page_kind(browse_id: &str) -> PageKind {
     if browse_id.starts_with("MPREb") || browse_id.starts_with("MPRE") {
         PageKind::Album
@@ -645,6 +702,8 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
 
     let shelves = parse_shelves(v);
     let continuation = parse_continuation(v);
+    let track_count = header.and_then(parse_track_count);
+    let playlist_id = parse_playlist_id(browse_id);
 
     Page {
         browse_id: browse_id.to_string(),
@@ -660,5 +719,7 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         tracks,
         shelves,
         continuation,
+        track_count,
+        playlist_id,
     }
 }

@@ -238,6 +238,26 @@ impl Client {
     pub async fn history(&self) -> Result<Vec<super::domain::Track>> {
         Ok(self.browse("FEmusic_history").await?.tracks)
     }
+
+    /// The rest of a long playlist, via the player panel.
+    ///
+    /// `browse` caps a playlist at 100 tracks. The `next` endpoint returns a
+    /// ~100-track window *around* an anchor video, so we anchor on the last
+    /// track we know and keep whatever is new.
+    pub async fn playlist_more(
+        &self,
+        anchor_video_id: &str,
+        playlist_id: &str,
+    ) -> Result<Vec<super::domain::Track>> {
+        let body = json!({
+            "videoId": anchor_video_id,
+            "playlistId": playlist_id,
+            "playlistPanelOffset": 0,
+            "isAudioOnly": true,
+        });
+        let value = self.post("next", body).await?;
+        Ok(extract::parse_panel_tracks(&value))
+    }
 }
 
 /// Extra shelves returned by a continuation request.
