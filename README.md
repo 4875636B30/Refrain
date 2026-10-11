@@ -54,13 +54,16 @@ intermittent HTTP 403s.
 
 - The stream is mirrored into `~/.cache/youtube-music-rs/audio/<video_id>.m4a`,
   so repeats play straight from disk.
-- The **next** track in the queue is downloaded in the background, making track
-  changes instant.
+- Streams are opened **ahead of time** — when a page or search loads, and after
+  hovering a track for ~250 ms — so pressing play starts in milliseconds instead
+  of waiting on yt-dlp. The next track in the queue is warmed the same way.
 - If no `m4a` stream is offered, playback falls back to the download path, where
   ffmpeg transcodes.
 
-The first play of a given track still waits a few seconds while `yt-dlp` solves
-YouTube's JS challenges before it emits any audio.
+The one unavoidable cost is the first `yt-dlp` extraction for a track (roughly
+6 s: ~1.6 s webpage, ~2 s solving YouTube's JS challenges, ~1.5 s startup).
+That work is moved off the critical path by prefetching, so it only shows up if
+you click a track you never hovered and whose page never warmed it.
 
 ### UI
 

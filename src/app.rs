@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use egui::{Align, Layout, RichText};
@@ -33,6 +33,11 @@ enum Msg {
     Auth(Result<Option<ResolvedAuth>, String>),
     /// A stream has been opened and decoded (off the UI thread).
     Decoded {
+        track: Track,
+        result: Result<rodio::Decoder<crate::audio::stream::RemoteSource>, String>,
+    },
+    /// A stream opened ahead of time, ready to play instantly.
+    Prefetched {
         track: Track,
         result: Result<rodio::Decoder<crate::audio::stream::RemoteSource>, String>,
     },
@@ -68,6 +73,12 @@ enum Nav {
     Home,
     Search,
     Library,
+}
+
+/// A stream opened before the user pressed play, so starting is instant.
+struct PrefetchedStream {
+    video_id: String,
+    decoder: rodio::Decoder<crate::audio::stream::RemoteSource>,
 }
 
 /// Turn a clicked result/shelf item into an action.
@@ -135,6 +146,11 @@ pub struct App {
     current: Option<usize>,
     pending_play: Option<Track>,
     downloading: HashSet<String>,
+    /// A stream opened ahead of the click; only one at a time.
+    prefetched: Option<PrefetchedStream>,
+    prefetch_inflight: HashSet<String>,
+    /// Debounce state for hover-triggered prefetching.
+    hover_target: Option<(String, Instant)>,
     advance_armed: bool,
 
     audio: Option<AudioEngine>,
@@ -222,6 +238,9 @@ impl App {
             current: None,
             pending_play: None,
             downloading: HashSet::new(),
+            prefetched: None,
+            prefetch_inflight: HashSet::new(),
+            hover_target: None,
             advance_armed: false,
             audio,
             audio_error,
@@ -268,6 +287,86 @@ impl App {
 
     /// Queue stream-URL resolution for tracks the user is likely to click, so
     /// playback can start without waiting on yt-dlp.
+    /// Start playing an already-opened decoder.
+    fn play_decoder(
+        &mut self,
+        decoder: rodio::Decoder<crate::audio::stream::RemoteSource>,
+        track: Track,
+    ) {
+        self.pending_play = None;
+        match self.audio.as_mut() {
+            Some(audio) => match audio.play_decoder(decoder, track) {
+                Ok(()) => {
+                    self.status = None;
+                    self.advance_armed = true;
+                }
+                Err(e) => self.status = Some(format!("Playback failed: {e}")),
+            },
+            None => {
+                self.status = Some(
+                    self.audio_error
+                        .clone()
+                        .unwrap_or_else(|| "Audio output unavailable".to_string()),
+                );
+            }
+        }
+    }
+
+    /// Open a stream ahead of the user pressing play.
+    fn prefetch(&mut self, ctx: &egui::Context, track: &Track) {
+        let video_id = track.video_id.clone();
+        if resolver::cache_path(&video_id).exists() {
+            return; // already on disk, so playback is instant anyway
+        }
+        if self.prefetched.as_ref().is_some_and(|p| p.video_id == video_id)
+            || self.prefetch_inflight.contains(&video_id)
+            || self
+                .pending_play
+                .as_ref()
+                .is_some_and(|t| t.video_id == video_id)
+        {
+            return;
+        }
+        // Don't pile up yt-dlp processes while sweeping the mouse.
+        if self.prefetch_inflight.len() >= 2 {
+            return;
+        }
+
+        self.prefetch_inflight.insert(video_id.clone());
+        let args = resolver::stream_args(&video_id, &self.auth);
+        let cache = Some(resolver::cache_path(&video_id));
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let track = track.clone();
+        std::thread::Builder::new()
+            .name("ytm-prefetch".into())
+            .spawn(move || {
+                let result = match crate::audio::stream::RemoteSource::new(args, cache) {
+                    Ok(source) => rodio::Decoder::new(source).map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = tx.send(Msg::Prefetched { track, result });
+                ctx.request_repaint();
+            })
+            .ok();
+    }
+
+    /// Prefetch the row under the pointer once it has rested there briefly.
+    fn hover_prefetch(&mut self, ctx: &egui::Context, hovered: Option<Track>) {
+        let Some(track) = hovered else {
+            self.hover_target = None;
+            return;
+        };
+        match &self.hover_target {
+            Some((video_id, since)) if video_id == &track.video_id => {
+                if since.elapsed() >= Duration::from_millis(250) {
+                    self.prefetch(ctx, &track);
+                }
+            }
+            _ => self.hover_target = Some((track.video_id.clone(), Instant::now())),
+        }
+    }
+
     /// Open a stream for `track` and decode it, off the UI thread.
     ///
     /// Starting a stream means waiting on `yt-dlp` (a few seconds), so the
@@ -326,17 +425,27 @@ impl App {
         if path.exists() {
             self.pending_play = None;
             self.play_path(&path, track);
+        } else if self
+            .prefetched
+            .as_ref()
+            .is_some_and(|p| p.video_id == track.video_id)
+        {
+            // Opened while hovering / when the page loaded: play immediately.
+            let prepared = self.prefetched.take().expect("checked above");
+            self.play_decoder(prepared.decoder, track);
+        } else if self.prefetch_inflight.contains(&track.video_id) {
+            // Already opening for this very track — just wait for it.
+            self.status = Some(format!("Starting stream for “{}”…", track.title));
+            self.pending_play = Some(track);
         } else {
             self.status = Some(format!("Starting stream for “{}”…", track.title));
             self.pending_play = Some(track.clone());
             self.start_stream(ctx, track);
         }
 
-        // Fetch the next track in the background so advancing is instant.
+        // Open the next track too, so advancing is quick.
         if let Some(next) = self.queue.get(idx + 1).cloned() {
-            if !resolver::cache_path(&next.video_id).exists() {
-                self.spawn_download(ctx, next.video_id.clone());
-            }
+            self.prefetch(ctx, &next);
         }
     }
 
@@ -390,6 +499,10 @@ impl App {
                     self.status = None;
                     self.view = View::Search;
                     self.nav = Nav::Search;
+                    // Warm the likely first click.
+                    if let Some(track) = self.results.iter().find_map(|item| item.to_track()) {
+                        self.prefetch(ctx, &track);
+                    }
                 }
                 Msg::Search(Err(e)) => {
                     self.busy = false;
@@ -399,9 +512,14 @@ impl App {
                     self.queue = page.tracks.clone();
                     self.current = None;
                     self.advance_armed = false;
+                    let first = page.tracks.first().cloned();
                     self.view = View::Detail(page);
                     self.busy = false;
                     self.status = None;
+                    // Warm the first track of the page.
+                    if let Some(track) = first {
+                        self.prefetch(ctx, &track);
+                    }
                 }
                 Msg::Page(Err(e)) => {
                     self.busy = false;
@@ -483,35 +601,42 @@ impl App {
                         .unwrap_or(false);
                     if is_pending {
                         match result {
-                            Ok(decoder) => {
-                                self.pending_play = None;
-                                match self.audio.as_mut() {
-                                    Some(audio) => match audio.play_decoder(decoder, track) {
-                                        Ok(()) => {
-                                            self.status = None;
-                                            self.advance_armed = true;
-                                        }
-                                        Err(e) => {
-                                            self.status = Some(format!("Playback failed: {e}"))
-                                        }
-                                    },
-                                    None => {
-                                        self.status = Some(
-                                            self.audio_error
-                                                .clone()
-                                                .unwrap_or_else(|| {
-                                                    "Audio output unavailable".to_string()
-                                                }),
-                                        );
-                                    }
-                                }
-                            }
+                            Ok(decoder) => self.play_decoder(decoder, track),
                             Err(e) => {
-                                // No streamable m4a, or yt-dlp/youtube refused:
+                                // No streamable m4a, or yt-dlp/YouTube refused:
                                 // fall back to the download+transcode path.
                                 self.status =
                                     Some(format!("Streaming unavailable ({e}) — downloading…"));
                                 self.spawn_download(ctx, video_id);
+                            }
+                        }
+                    }
+                }
+                Msg::Prefetched { track, result } => {
+                    self.prefetch_inflight.remove(&track.video_id);
+                    let is_pending = self
+                        .pending_play
+                        .as_ref()
+                        .is_some_and(|t| t.video_id == track.video_id);
+                    match result {
+                        Ok(decoder) if is_pending => {
+                            // The user clicked while it was still opening.
+                            self.play_decoder(decoder, track);
+                        }
+                        Ok(decoder) => {
+                            // Hold only the most recent prefetched stream;
+                            // dropping the previous one stops its yt-dlp process.
+                            self.prefetched = Some(PrefetchedStream {
+                                video_id: track.video_id,
+                                decoder,
+                            });
+                        }
+                        Err(e) => {
+                            if is_pending {
+                                self.status = Some(format!(
+                                    "Streaming unavailable ({e}) — downloading…"
+                                ));
+                                self.spawn_download(ctx, track.video_id);
                             }
                         }
                     }
@@ -741,6 +866,7 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut action: Option<Action> = None;
+        let mut hovered: Option<Track> = None;
         let view = std::mem::replace(&mut self.view, View::Search);
         let current_video = self
             .current
@@ -751,12 +877,15 @@ impl App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match &view {
-                    View::Search => self.results_view(ui, &current_video, &mut action),
-                    View::Detail(page) => self.detail_view(ui, page, &current_video, &mut action),
+                    View::Search => self.results_view(ui, &current_video, &mut action, &mut hovered),
+                    View::Detail(page) => {
+                        self.detail_view(ui, page, &current_video, &mut action, &mut hovered)
+                    }
                 });
         });
 
         self.view = view;
+        self.hover_prefetch(ctx, hovered);
         if let Some(action) = action {
             self.handle_action(ctx, action);
         }
@@ -767,6 +896,7 @@ impl App {
         ui: &mut egui::Ui,
         current_video: &Option<String>,
         action: &mut Option<Action>,
+        hovered: &mut Option<Track>,
     ) {
         if self.results.is_empty() {
             empty_state(ui, self.busy);
@@ -790,6 +920,9 @@ impl App {
                     item.playable(),
                     item.navigable(),
                 );
+                if row.hovered() {
+                    *hovered = item.to_track();
+                }
                 if row.clicked() {
                     *action = activate(&self.results, idx);
                 }
@@ -811,6 +944,7 @@ impl App {
         page: &Page,
         current_video: &Option<String>,
         action: &mut Option<Action>,
+        hovered: &mut Option<Track>,
     ) {
         detail_header(ui, page, &self.thumbnails);
 
@@ -831,6 +965,9 @@ impl App {
                 true,
                 false,
             );
+            if row.hovered() {
+                *hovered = Some(track.clone());
+            }
             if row.clicked() {
                 *action = Some(Action::PlayQueueIndex(idx));
             }
@@ -1017,6 +1154,10 @@ impl eframe::App for App {
         // Keep pulling in artwork that is still on its way.
         if !self.thumb_inflight.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(40));
+        }
+        // Keep the hover debounce and prefetches ticking.
+        if self.hover_target.is_some() || !self.prefetch_inflight.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(120));
         }
     }
 }

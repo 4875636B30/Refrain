@@ -230,12 +230,13 @@ fn play_test_cmd(video_id: &str) -> anyhow::Result<()> {
     let args = audio::resolver::stream_args(video_id, &auth);
     let cache = Some(audio::resolver::cache_path(video_id));
 
-    let started = std::time::Instant::now();
+    // Phase 1: what hover/page-load prefetching does (hidden from the user).
+    let prefetch = std::time::Instant::now();
     let source = audio::stream::RemoteSource::new(args, cache)?;
     let decoder = rodio::Decoder::new(source)?;
     println!(
-        "decoded in {:?} (total {:?})",
-        started.elapsed(),
+        "prefetch (open + decode) took {:?} (total {:?})",
+        prefetch.elapsed(),
         decoder.total_duration()
     );
 
@@ -244,7 +245,12 @@ fn play_test_cmd(video_id: &str) -> anyhow::Result<()> {
         title: "play-test".to_string(),
         ..Default::default()
     };
+
+    // Phase 2: the user clicks — this is now nearly free.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let clicked = std::time::Instant::now();
     engine.play_decoder(decoder, track)?;
+    println!("click -> playing in {:?}", clicked.elapsed());
 
     std::thread::sleep(std::time::Duration::from_secs(3));
     println!(
