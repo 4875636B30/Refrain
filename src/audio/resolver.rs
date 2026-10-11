@@ -8,6 +8,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
@@ -104,6 +105,78 @@ pub fn cache_path(video_id: &str) -> PathBuf {
 }
 
 /// Remove scratch files left behind by streams that were stopped early.
+/// Budget for cached audio. Tracks run a few MB each, so this is a few hundred
+/// of them: everything played recently stays, but the directory cannot grow
+/// without bound.
+const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Files touched more recently than this are never evicted — they may be the
+/// track that is playing, one being warmed, or a fetch still in flight.
+const CACHE_PROTECT: Duration = Duration::from_secs(10 * 60);
+
+/// Drop the least recently used cached tracks until the cache fits its budget.
+///
+/// Returns how many files were removed and how many bytes that freed.
+pub fn prune_cache() -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(cache_dir()) else {
+        return (0, 0);
+    };
+
+    let mut files: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "m4a") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        files.push((meta.modified().unwrap_or(UNIX_EPOCH), meta.len(), path));
+    }
+
+    let plan = eviction_plan(files, CACHE_BUDGET_BYTES, SystemTime::now(), CACHE_PROTECT);
+    let (mut removed, mut freed) = (0usize, 0u64);
+    for (size, path) in plan {
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            freed += size;
+        }
+    }
+    (removed, freed)
+}
+
+/// Choose which cached files to drop: oldest first, until what remains fits the
+/// budget. Anything touched within `protect` is left alone — it may be the
+/// track that is playing, one being warmed, or a fetch still in flight, and
+/// evicting those would be far worse than being briefly over budget.
+fn eviction_plan(
+    files: Vec<(SystemTime, u64, PathBuf)>,
+    budget: u64,
+    now: SystemTime,
+    protect: Duration,
+) -> Vec<(u64, PathBuf)> {
+    let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+    if total <= budget {
+        return Vec::new();
+    }
+
+    let mut files = files;
+    files.sort_by_key(|(touched, _, _)| *touched);
+
+    let mut plan = Vec::new();
+    for (touched, size, path) in files {
+        if total <= budget {
+            break;
+        }
+        if now.duration_since(touched).unwrap_or_default() < protect {
+            continue;
+        }
+        total -= size;
+        plan.push((size, path));
+    }
+    plan
+}
+
 pub fn clean_stale_parts() {
     let Ok(entries) = std::fs::read_dir(cache_dir()) else {
         return;
@@ -422,4 +495,61 @@ pub async fn download_track(video_id: &str, auth: &crate::config::AuthConfig) ->
     }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ago(secs: u64) -> SystemTime {
+        SystemTime::now() - Duration::from_secs(secs)
+    }
+
+    fn file(age_secs: u64, size: u64, name: &str) -> (SystemTime, u64, PathBuf) {
+        (ago(age_secs), size, PathBuf::from(name))
+    }
+
+    /// Under budget, nothing is touched.
+    #[test]
+    fn keeps_everything_under_budget() {
+        let files = vec![file(60, 100, "a"), file(120, 100, "b")];
+        let plan = eviction_plan(files, 1000, SystemTime::now(), Duration::from_secs(10));
+        assert!(plan.is_empty());
+    }
+
+    /// Over budget, the oldest go first and only enough to fit.
+    #[test]
+    fn evicts_oldest_first_until_it_fits() {
+        let files = vec![
+            file(3600, 400, "oldest"),
+            file(1800, 400, "middle"),
+            file(900, 400, "newest"),
+        ];
+        // 1200 bytes held, budget 500: dropping the two oldest leaves 400.
+        // The protection window is short here so all three are eligible.
+        let plan = eviction_plan(files, 500, SystemTime::now(), Duration::from_secs(60));
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].1, PathBuf::from("oldest"));
+        assert_eq!(plan[1].1, PathBuf::from("middle"));
+    }
+
+    /// A track being written or played right now must survive, even when the
+    /// cache is over budget — hence the age floor rather than plain LRU.
+    #[test]
+    fn never_evicts_recently_touched_files() {
+        let files = vec![file(3600, 800, "stale"), file(1, 800, "in-use")];
+        // Budget forces eviction, but only the stale file may go.
+        let plan = eviction_plan(files, 800, SystemTime::now(), Duration::from_secs(600));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].1, PathBuf::from("stale"));
+    }
+
+    /// If everything is protected, the cache stays over budget rather than
+    /// evicting something that is in use.
+    #[test]
+    fn stays_over_budget_when_all_protected() {
+        let files = vec![file(1, 800, "a"), file(2, 800, "b")];
+        let plan = eviction_plan(files, 100, SystemTime::now(), Duration::from_secs(600));
+        assert!(plan.is_empty());
+    }
 }

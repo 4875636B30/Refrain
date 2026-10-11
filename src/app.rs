@@ -72,6 +72,13 @@ const MAX_THUMB_INFLIGHT: usize = 6;
 /// enough that an actual play still gets CPU when it needs it.
 const MAX_CACHE_WORKERS: usize = 3;
 
+/// How often the cache budget is enforced, at the quiet moment after the warm
+/// queue drains. Startup prunes unconditionally.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How long a click waits for sign-in before playing without it.
+const DEFERRED_PLAY_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// How many times we page in more shelves for a feed (home/explore/library).
 const MAX_MORE_ROUNDS: u32 = 5;
 
@@ -335,6 +342,9 @@ pub struct App {
     authenticated: bool,
     /// A track the user asked to play before we knew a cookie source.
     deferred_play: Option<usize>,
+    /// When the current deferral started, so a sign-in that never completes
+    /// can't strand the click forever.
+    deferred_since: Option<Instant>,
 
     query: String,
     filter: SearchFilter,
@@ -362,6 +372,8 @@ pub struct App {
     cache_queue: Arc<Mutex<VecDeque<String>>>,
     /// Tracks a worker has claimed but not finished (prevents duplicate work).
     cache_inflight: Arc<Mutex<HashSet<String>>>,
+    /// When the cache budget was last enforced.
+    last_prune: Instant,
     /// Streams opened ahead of the click (most recent last).
     prefetched: Vec<PrefetchedStream>,
     /// How often each track has been played here, so favourites get warmed.
@@ -427,6 +439,17 @@ impl App {
 
         let ytdlp = resolver::locate_ytdlp();
         resolver::clean_stale_parts();
+        // Enforcing the cache budget walks the whole directory, so keep it off
+        // the startup path.
+        std::thread::spawn(|| {
+            let (removed, freed) = resolver::prune_cache();
+            if removed > 0 {
+                eprintln!(
+                    "[cache] evicted {removed} tracks ({:.0} MB)",
+                    freed as f64 / 1e6
+                );
+            }
+        });
         let status = if ytdlp.is_none() {
             Some(
                 "yt-dlp not found — playback is disabled. Install it or set YTDLP_PATH."
@@ -494,6 +517,7 @@ impl App {
             auth,
             authenticated: false,
             deferred_play: None,
+            deferred_since: None,
             query: String::new(),
             filter: SearchFilter::All,
             last_search: None,
@@ -512,6 +536,7 @@ impl App {
             url_cache: HashMap::new(),
             cache_queue: Arc::new(Mutex::new(VecDeque::new())),
             cache_inflight: Arc::new(Mutex::new(HashSet::new())),
+            last_prune: Instant::now(),
             prefetched: Vec::new(),
             play_counts: load_play_counts(),
             history: Vec::new(),
@@ -846,6 +871,25 @@ impl App {
                 ctx.request_repaint();
             });
         }
+
+        // Once the queue has drained, nothing is being written and it is a safe
+        // moment to enforce the cache budget. Throttled, since this walks the
+        // whole directory.
+        if self.cache_queue.lock().unwrap().is_empty()
+            && self.cache_inflight.lock().unwrap().is_empty()
+            && self.last_prune.elapsed() > PRUNE_INTERVAL
+        {
+            self.last_prune = Instant::now();
+            std::thread::spawn(|| {
+                let (removed, freed) = resolver::prune_cache();
+                if removed > 0 {
+                    eprintln!(
+                        "[cache] evicted {removed} tracks ({:.0} MB)",
+                        freed as f64 / 1e6
+                    );
+                }
+            });
+        }
     }
 
     fn spawn_download(&mut self, ctx: &egui::Context, video_id: String) {
@@ -869,6 +913,11 @@ impl App {
     }
 
     fn play_index(&mut self, ctx: &egui::Context, idx: usize) {
+        self.play_at(ctx, idx, false);
+    }
+
+    /// Play `idx`, optionally skipping the wait for sign-in.
+    fn play_at(&mut self, ctx: &egui::Context, idx: usize, anonymous_ok: bool) {
         let Some(track) = self.queue.get(idx).cloned() else {
             return;
         };
@@ -876,8 +925,9 @@ impl App {
         // Cached tracks need no network, so they can play immediately. Anything
         // else must wait until we know a concrete cookie source, or the
         // anonymous download would be bot-blocked.
-        if !path.exists() && matches!(self.auth.mode, AuthMode::Auto) {
+        if !path.exists() && !anonymous_ok && matches!(self.auth.mode, AuthMode::Auto) {
             self.deferred_play = Some(idx);
+            self.deferred_since = Some(Instant::now());
             self.status = Some("Signing in…".to_string());
             return;
         }
@@ -1080,6 +1130,17 @@ impl App {
             if self.underruns == 1 || self.underruns.is_multiple_of(20) {
                 eprintln!("[audio] buffer underrun (x{}) — {error}", self.underruns);
             }
+            return;
+        }
+
+        // Nothing is playing, so there is nothing to recover: an idle ALSA
+        // device reports POLLERR on its own, and rebuilding here would churn
+        // the output device (and say so in the status bar) for no reason.
+        if self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.now_playing.is_none())
+        {
             return;
         }
 
@@ -1296,6 +1357,7 @@ impl App {
                     }
                     // Play whatever the user asked for before sign-in finished.
                     if let Some(idx) = self.deferred_play.take() {
+                        self.deferred_since = None;
                         self.play_index(ctx, idx);
                     }
                 }
@@ -1445,6 +1507,26 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Play a click that has been waiting too long for sign-in.
+    ///
+    /// `deferred_play` is otherwise only drained by a successful sign-in, so
+    /// when there is no usable cookie source (or the import fails) the click
+    /// would be dropped silently and the bar would sit on "Signing in…"
+    /// forever. Better to play anonymously, which is how the app behaves when
+    /// no browser is signed in at all.
+    fn tick_deferred_play(&mut self, ctx: &egui::Context) {
+        let (Some(idx), Some(since)) = (self.deferred_play, self.deferred_since) else {
+            return;
+        };
+        if since.elapsed() < DEFERRED_PLAY_TIMEOUT {
+            return;
+        }
+        self.deferred_play = None;
+        self.deferred_since = None;
+        self.status = Some("Sign-in is taking a while — playing without it".to_string());
+        self.play_at(ctx, idx, true);
     }
 
     fn tick_playback(&mut self, ctx: &egui::Context) {
@@ -2207,6 +2289,7 @@ impl eframe::App for App {
         self.handle_shortcuts(&ctx);
         self.ensure_thumbnails(&ctx);
         self.tick_playback(&ctx);
+        self.tick_deferred_play(&ctx);
         self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);
