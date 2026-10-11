@@ -21,6 +21,7 @@ use crate::auth::ResolvedAuth;
 use crate::config::{AuthConfig, AuthMode, Config};
 use crate::thumbs;
 use crate::ui;
+use crate::ytm::domain::LikeStatus;
 use crate::ytm::{Client, ItemKind, Page, SearchFilter, SearchItem, Track};
 
 enum Msg {
@@ -54,6 +55,16 @@ enum Msg {
     },
     /// The background cache worker drained its queue.
     CacheIdle,
+    /// The rating for a track, read from the watch-next response.
+    LikeStatus {
+        video_id: String,
+        result: Result<(LikeStatus, bool), String>,
+    },
+    /// A rating change came back from the server.
+    LikeSet {
+        video_id: String,
+        result: Result<(), String>,
+    },
     /// The account's listening history, used to warm likely tracks.
     History(Result<Vec<Track>, String>),
     Image {
@@ -376,6 +387,12 @@ pub struct App {
     last_prune: Instant,
     /// Whether the "Up next" queue panel is showing.
     show_queue: bool,
+    /// The rating shown for the playing track, and whether rating is allowed.
+    like_status: LikeStatus,
+    likes_allowed: bool,
+    /// The track the rating belongs to, so it is refetched when that changes.
+    like_for: Option<String>,
+    like_inflight: bool,
     /// Streams opened ahead of the click (most recent last).
     prefetched: Vec<PrefetchedStream>,
     /// How often each track has been played here, so favourites get warmed.
@@ -540,6 +557,10 @@ impl App {
             cache_inflight: Arc::new(Mutex::new(HashSet::new())),
             last_prune: Instant::now(),
             show_queue: false,
+            like_status: LikeStatus::Indifferent,
+            likes_allowed: false,
+            like_for: None,
+            like_inflight: false,
             prefetched: Vec::new(),
             play_counts: load_play_counts(),
             history: Vec::new(),
@@ -1476,6 +1497,31 @@ impl App {
                 Msg::CacheIdle => {
                     self.pump_cache_worker(ctx);
                 }
+                Msg::LikeStatus { video_id, result } => {
+                    self.like_inflight = false;
+                    match result {
+                        Ok((status, allowed)) => {
+                            // Ignore a reply for a track we have already left.
+                            if self.like_for.as_deref() == Some(video_id.as_str()) {
+                                self.like_status = status;
+                                self.likes_allowed = allowed;
+                            }
+                        }
+                        Err(e) => {
+                            self.status = Some(format!("Could not read the rating: {e}"));
+                            self.like_for = None;
+                        }
+                    }
+                }
+                Msg::LikeSet { video_id, result } => {
+                    if let Err(e) = result {
+                        self.status = Some(format!("Could not update the rating: {e}"));
+                        // Rather than guess at a rollback, re-read the truth.
+                        if self.like_for.as_deref() == Some(video_id.as_str()) {
+                            self.like_for = None;
+                        }
+                    }
+                }
                 Msg::Image { uri, result } => {
                     self.thumb_inflight.remove(&uri);
                     match result {
@@ -2074,6 +2120,49 @@ impl App {
         }
     }
 
+    /// Keep the displayed rating in step with the track that is playing.
+    fn tick_like_status(&mut self, ctx: &egui::Context) {
+        if !self.authenticated || self.like_inflight {
+            return;
+        }
+        let Some(track) = self.audio.as_ref().and_then(|a| a.now_playing.clone()) else {
+            return;
+        };
+        if self.like_for.as_deref() == Some(track.video_id.as_str()) {
+            return;
+        }
+        self.like_inflight = true;
+        self.like_for = Some(track.video_id.clone());
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .like_status(&track.video_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::LikeStatus {
+                video_id: track.video_id,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_set_like(&mut self, ctx: &egui::Context, video_id: String, status: LikeStatus) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .set_like(&video_id, status)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::LikeSet { video_id, result });
+            ctx.request_repaint();
+        });
+    }
+
     /// YouTube Music's "Up next" list. Reuses the ordinary row so the playing
     /// track carries the same equaliser marker it has everywhere else.
     fn queue_panel(
@@ -2151,6 +2240,10 @@ impl App {
         let mut shuffle = self.shuffle;
         let mut repeat = self.repeat;
         let mut show_queue = self.show_queue;
+        let mut like_click: Option<LikeStatus> = None;
+        let like_status = self.like_status;
+        let likes_allowed = self.likes_allowed;
+        let signed_in = self.authenticated;
 
         egui::Panel::bottom("player")
             .resizable(false)
@@ -2199,9 +2292,12 @@ impl App {
                                     6.0,
                                 );
                                 ui.add_space(10.0);
+                                // Room is reserved for the thumbs whether or
+                                // not they are drawn, so the title can't shift.
+                                const THUMBS_W: f32 = 56.0;
                                 ui::fixed_section(
                                     ui,
-                                    egui::vec2((side - 76.0).max(60.0), row_height),
+                                    egui::vec2((side - 76.0 - THUMBS_W).max(60.0), row_height),
                                     Layout::top_down(Align::Min),
                                     |ui| {
                                         ui.add_space(12.0);
@@ -2217,6 +2313,33 @@ impl App {
                                         );
                                     },
                                 );
+                                // YouTube Music keeps the rating beside the
+                                // title; rating needs a signed-in listener.
+                                ui.add_space(4.0);
+                                ui.add_enabled_ui(signed_in && likes_allowed, |ui| {
+                                    if ui::transport_toggle(
+                                        ui,
+                                        "👍",
+                                        None,
+                                        like_status == LikeStatus::Like,
+                                        26.0,
+                                    )
+                                    .clicked()
+                                    {
+                                        like_click = Some(LikeStatus::Like);
+                                    }
+                                    if ui::transport_toggle(
+                                        ui,
+                                        "👎",
+                                        None,
+                                        like_status == LikeStatus::Dislike,
+                                        26.0,
+                                    )
+                                    .clicked()
+                                    {
+                                        like_click = Some(LikeStatus::Dislike);
+                                    }
+                                });
                             } else {
                                 ui.label(RichText::new("Nothing playing").weak());
                             }
@@ -2345,6 +2468,14 @@ impl App {
         self.shuffle = shuffle;
         self.repeat = repeat;
         self.show_queue = show_queue;
+        if let Some(clicked) = like_click {
+            let next = self.like_status.toggled(clicked);
+            if let Some(track) = self.audio.as_ref().and_then(|a| a.now_playing.clone()) {
+                // Show it straight away; a failure re-reads the real state.
+                self.like_status = next;
+                self.spawn_set_like(ctx, track.video_id, next);
+            }
+        }
         if volume > 0.001 {
             self.last_volume = volume;
         }
@@ -2380,6 +2511,7 @@ impl eframe::App for App {
         self.ensure_thumbnails(&ctx);
         self.tick_playback(&ctx);
         self.tick_deferred_play(&ctx);
+        self.tick_like_status(&ctx);
         self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);

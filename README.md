@@ -214,6 +214,7 @@ cargo run -- --download <video_id>    # resolve, cache, and decode one track
 cargo run -- --decode <path>          # decode a local audio file
 cargo run -- --thumb <url>            # verify the artwork pipeline
 cargo run -- --auth-check             # sign-in diagnostics
+cargo run -- --like-status <video_id> # read a track's rating (read-only)
 ```
 
 ### Artwork
@@ -238,6 +239,8 @@ Verified working:
       the playing row, and an "Up next" queue panel
 - [x] Cached audio is budgeted (2GB, oldest first, never touching anything
       playing or in flight)
+- [x] Thumbs up / down, read from the watch-next response and written back
+      through InnerTube's `like` endpoints (signed in)
 - [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family
       (incl. Flatpak), with automatic keyring selection, plus `cookies.txt` import

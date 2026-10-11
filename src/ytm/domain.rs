@@ -1,5 +1,26 @@
 //! Clean domain types, decoupled from YouTube's deeply-nested renderer JSON.
 
+/// How the signed-in listener rated a track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LikeStatus {
+    #[default]
+    Indifferent,
+    Like,
+    Dislike,
+}
+
+impl LikeStatus {
+    /// The status a thumb click moves to. Clicking the rating that is already
+    /// active clears it, which is how YouTube Music's thumbs behave.
+    pub fn toggled(self, clicked: Self) -> Self {
+        if self == clicked {
+            Self::Indifferent
+        } else {
+            clicked
+        }
+    }
+}
+
 /// A playable song / video.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Track {
@@ -173,5 +194,22 @@ impl SearchItem {
             thumbnail: track.thumbnail.clone(),
             duration_secs: track.duration_secs,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LikeStatus::{Dislike, Indifferent, Like};
+
+    /// Clicking the active thumb clears the rating; clicking the other one
+    /// switches to it. This is the whole toggle behaviour in one place.
+    #[test]
+    fn thumbs_toggle_the_way_youtube_music_does() {
+        assert_eq!(Indifferent.toggled(Like), Like);
+        assert_eq!(Indifferent.toggled(Dislike), Dislike);
+        assert_eq!(Like.toggled(Like), Indifferent);
+        assert_eq!(Dislike.toggled(Dislike), Indifferent);
+        assert_eq!(Like.toggled(Dislike), Dislike);
+        assert_eq!(Dislike.toggled(Like), Like);
     }
 }

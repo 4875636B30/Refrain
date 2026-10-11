@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::auth::CookieJar;
 
-use super::domain::{Page, SearchItem, Shelf};
+use super::domain::{LikeStatus, Page, SearchItem, Shelf};
 use super::extract;
 
 const ENDPOINT_BASE: &str = "https://music.youtube.com/youtubei/v1";
@@ -203,8 +203,34 @@ impl Client {
                 body_text.chars().take(200).collect::<String>()
             );
         }
+        // The like endpoints reply with an empty body, so an absent payload is
+        // not an error.
+        if body_text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
         serde_json::from_str(&body_text)
             .with_context(|| format!("decoding {endpoint} JSON response"))
+    }
+
+    /// How the signed-in listener rated a track, and whether rating is allowed.
+    ///
+    /// The watch-next response is where the player overlays carry this, so it
+    /// costs one request when the playing track changes.
+    pub async fn like_status(&self, video_id: &str) -> Result<(LikeStatus, bool)> {
+        let value = self.post("next", json!({ "videoId": video_id })).await?;
+        Ok(extract::parse_like_status(&value))
+    }
+
+    /// Set or clear the rating for a track.
+    pub async fn set_like(&self, video_id: &str, status: LikeStatus) -> Result<()> {
+        let endpoint = match status {
+            LikeStatus::Like => "like/like",
+            LikeStatus::Dislike => "like/dislike",
+            LikeStatus::Indifferent => "like/removelike",
+        };
+        self.post(endpoint, json!({ "target": { "videoId": video_id } }))
+            .await?;
+        Ok(())
     }
 
     /// Search the catalogue. Results are de-duplicated and classified.

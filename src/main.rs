@@ -93,6 +93,21 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // `--like-status <video_id>` reads the rating YouTube holds for a track.
+    // Read-only on purpose: it must never change the listener's library.
+    if let Some(pos) = args.iter().position(|a| a == "--like-status") {
+        let id = args.get(pos + 1).cloned().unwrap_or_default();
+        if id.is_empty() {
+            eprintln!("usage: --like-status <video_id>");
+            std::process::exit(2);
+        }
+        if let Err(e) = like_status_cmd(&id) {
+            eprintln!("like-status failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // `--decode <path>` checks that rodio can decode a given audio file.
     if let Some(pos) = args.iter().position(|a| a == "--decode") {
         let path = args.get(pos + 1).cloned().unwrap_or_default();
@@ -508,6 +523,24 @@ fn download_cmd(video_id: &str) -> anyhow::Result<()> {
         "rodio decode OK: duration={:?}, first {} samples read",
         duration, samples
     );
+    Ok(())
+}
+
+fn like_status_cmd(video_id: &str) -> anyhow::Result<()> {
+    use ytm::Client;
+
+    let (lang, country) = config::Config::locale();
+    let rt = tokio::runtime::Runtime::new()?;
+    let cfg = config::Config::load();
+    let jar = rt
+        .block_on(auth::resolve(&cfg))
+        .ok()
+        .flatten()
+        .map(|r| r.jar);
+    let client = Client::new(&lang, &country, jar)?;
+
+    let (status, allowed) = rt.block_on(client.like_status(video_id))?;
+    println!("{video_id}: rating={status:?} rateable={allowed}");
     Ok(())
 }
 

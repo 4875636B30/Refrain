@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use super::domain::{ItemKind, Page, PageKind, SearchItem, Shelf, Track};
+use super::domain::{ItemKind, LikeStatus, Page, PageKind, SearchItem, Shelf, Track};
 
 /// Tile artwork renders around 160px, so ask for a source near that.
 const THUMBNAIL_TARGET: u32 = 220;
@@ -721,5 +721,76 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         continuation,
         track_count,
         playlist_id,
+    }
+}
+
+/// Read the rating state from a watch-next response.
+///
+/// The player overlays carry it: `likeButtonRenderer.likeStatus` is one of
+/// `INDIFFERENT` / `LIKE` / `DISLIKE`, next to whether rating is allowed at all.
+/// Missing entirely (older or reshuffled responses) reads as "not rated, and
+/// not rateable", which is the safe direction to fail in.
+pub fn parse_like_status(v: &Value) -> (LikeStatus, bool) {
+    let Some(button) = find_first(v, "likeButtonRenderer") else {
+        return (LikeStatus::Indifferent, false);
+    };
+    let status = match button.get("likeStatus").and_then(Value::as_str) {
+        Some("LIKE") => LikeStatus::Like,
+        Some("DISLIKE") => LikeStatus::Dislike,
+        _ => LikeStatus::Indifferent,
+    };
+    let allowed = button
+        .get("likesAllowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (status, allowed)
+}
+
+#[cfg(test)]
+mod like_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shape captured from a real watch-next response, trimmed to the parts
+    /// that matter.
+    fn response(status: &str, allowed: bool) -> Value {
+        json!({
+            "playerOverlays": { "playerOverlayRenderer": { "actions": [ {
+                "likeButtonRenderer": {
+                    "target": { "videoId": "khnokW3Mw24" },
+                    "likeStatus": status,
+                    "likesAllowed": allowed
+                }
+            } ] } }
+        })
+    }
+
+    #[test]
+    fn reads_the_rating_from_the_player_overlays() {
+        assert_eq!(
+            parse_like_status(&response("LIKE", true)),
+            (LikeStatus::Like, true)
+        );
+        assert_eq!(
+            parse_like_status(&response("DISLIKE", true)),
+            (LikeStatus::Dislike, true)
+        );
+        assert_eq!(
+            parse_like_status(&response("INDIFFERENT", true)),
+            (LikeStatus::Indifferent, true)
+        );
+    }
+
+    /// A reshuffled or truncated response must not claim the track is rateable.
+    #[test]
+    fn missing_overlays_read_as_unrated_and_unrateable() {
+        assert_eq!(
+            parse_like_status(&json!({})),
+            (LikeStatus::Indifferent, false)
+        );
+        assert_eq!(
+            parse_like_status(&json!({ "playerOverlays": {} })),
+            (LikeStatus::Indifferent, false)
+        );
     }
 }
