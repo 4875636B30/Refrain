@@ -337,8 +337,8 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
             1.0,
             visuals.widgets.inactive.bg_stroke.color,
         ))
-        .corner_radius(egui::CornerRadius::same(16))
-        .inner_margin(egui::Margin::symmetric(12, 6));
+        .corner_radius(egui::CornerRadius::same(15))
+        .inner_margin(egui::Margin::symmetric(12, 4));
 
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -346,7 +346,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
             let edit = ui.add(
                 egui::TextEdit::singleline(query)
                     // Transparent so the pill provides the background.
-                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
+                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 3)))
                     .hint_text("Search songs, albums, artists…")
                     .desired_width(width),
             );

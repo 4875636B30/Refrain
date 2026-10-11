@@ -167,6 +167,8 @@ pub struct App {
     hover_target: Option<(String, Instant)>,
     /// Rounds of continuation loading for the current feed page.
     more_rounds: u32,
+    /// Whether the home feed has been reloaded after sign-in.
+    home_reloaded: bool,
     advance_armed: bool,
 
     audio: Option<AudioEngine>,
@@ -232,7 +234,7 @@ impl App {
         // waiting for the (slower) InnerTube cookie extraction.
         let auth = crate::auth::cached_source().unwrap_or_else(|| cfg.auth.clone());
         let theme_light = cfg.ui.theme == "light";
-        Ok(Self {
+        let mut app = Self {
             rt,
             client,
             tx,
@@ -243,7 +245,7 @@ impl App {
             deferred_play: None,
             query: String::new(),
             filter: SearchFilter::All,
-            nav: Nav::Search,
+            nav: Nav::Home,
             theme_light,
             theme_applied: false,
             view: View::Search,
@@ -258,6 +260,7 @@ impl App {
             prefetch_inflight: HashSet::new(),
             hover_target: None,
             more_rounds: 0,
+            home_reloaded: false,
             advance_armed: false,
             audio,
             audio_error,
@@ -266,7 +269,10 @@ impl App {
             thumbnails: HashMap::new(),
             thumb_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
-        })
+        };
+        // Open on the home feed rather than a blank search page.
+        app.open_page(&cc.egui_ctx, "FEmusic_home".to_string());
+        Ok(app)
     }
 
     // ---------------------------------------------------------------- actions
@@ -630,6 +636,16 @@ impl App {
                         }
                         Err(e) => self.status = Some(format!("Cookie import failed: {e}")),
                     }
+                    // Reload the home feed now that we're signed in, so the
+                    // recommendations match the account.
+                    if !self.home_reloaded {
+                        if let View::Detail(page) = &self.view {
+                            if page.browse_id == "FEmusic_home" {
+                                self.home_reloaded = true;
+                                self.open_page(ctx, "FEmusic_home".to_string());
+                            }
+                        }
+                    }
                     // Play whatever the user asked for before sign-in finished.
                     if let Some(idx) = self.deferred_play.take() {
                         self.play_index(ctx, idx);
@@ -804,20 +820,20 @@ impl App {
         let mut nav = self.nav;
         egui::Panel::left("sidebar")
             .resizable(false)
-            .exact_size(190.0)
+            .exact_size(176.0)
             .show(ui, |ui| {
-                ui.add_space(14.0);
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
-                    ui.label(RichText::new("♪  YouTube Music").size(16.0).strong());
+                    ui.label(RichText::new("♪  YouTube Music").size(15.0).strong());
                 });
-                ui.add_space(14.0);
+                ui.add_space(12.0);
                 nav_button(ui, &mut nav, Nav::Home, "🏠   Home");
                 nav_button(ui, &mut nav, Nav::Search, "🔍   Search");
                 nav_button(ui, &mut nav, Nav::Library, "📚   Library");
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.separator();
-                ui.add_space(10.0);
+                ui.add_space(8.0);
 
                 let theme_label = if self.theme_light {
                     "☾   Dark theme"
@@ -868,13 +884,13 @@ impl App {
         let mut do_search = false;
         let mut go_back = false;
         egui::Panel::top("top").show(ui, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.add_space(4.0);
+                ui.add_space(8.0);
                 if ui
                     .add_enabled(
                         !matches!(self.view, View::Search),
-                        egui::Button::new("⏴  Back"),
+                        egui::Button::new("⏴  Back").min_size(egui::vec2(0.0, 30.0)),
                     )
                     .clicked()
                 {
@@ -895,14 +911,17 @@ impl App {
                         }
                     });
 
-                if ui.button("Search").clicked() {
+                if ui
+                    .add_sized([90.0, 30.0], egui::Button::new("Search"))
+                    .clicked()
+                {
                     do_search = true;
                 }
                 if self.busy {
                     ui.spinner();
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(6.0);
         });
 
         if go_back {
@@ -989,7 +1008,7 @@ impl App {
             ui,
             &self.thumbnails,
             &self.results,
-            156.0,
+            196.0,
             current_video.as_deref(),
         ) {
             *action = activate(&self.results, idx);
@@ -1045,7 +1064,7 @@ impl App {
                 ui,
                 &self.thumbnails,
                 &shelf.items,
-                156.0,
+                196.0,
                 current_video.as_deref(),
             ) {
                 *action = activate(&shelf.items, idx);
@@ -1096,14 +1115,27 @@ impl App {
                                     ui,
                                     track.thumbnail.as_deref(),
                                     &self.thumbnails,
-                                    egui::vec2(48.0, 48.0),
+                                    egui::vec2(54.0, 54.0),
                                     6.0,
                                 );
                                 ui.add_space(10.0);
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(&track.title).strong());
-                                    ui.label(RichText::new(track.artist_line()).weak().small());
-                                });
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(238.0, row_height),
+                                    Layout::top_down(Align::Min),
+                                    |ui| {
+                                        ui.add_space(12.0);
+                                        ui.add(
+                                            egui::Label::new(RichText::new(&track.title).strong())
+                                                .truncate(),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(track.artist_line()).weak().small(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
                             } else {
                                 ui.label(RichText::new("Nothing playing").weak());
                             }
@@ -1141,10 +1173,10 @@ impl App {
                         Layout::right_to_left(Align::Center),
                         |ui| {
                             ui.add_sized(
-                                egui::vec2(96.0, 16.0),
+                                egui::vec2(110.0, 16.0),
                                 egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
                             );
-                            ui.add_space(2.0);
+                            ui.add_space(4.0);
                             ui.label(RichText::new("🔊").weak());
                         },
                     );
