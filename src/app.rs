@@ -1183,9 +1183,6 @@ impl App {
                 if nav_button(ui, &mut nav, Nav::Home, "🏠   Home") {
                     activated = Some(Nav::Home);
                 }
-                if nav_button(ui, &mut nav, Nav::Search, "🔍   Search") {
-                    activated = Some(Nav::Search);
-                }
                 if nav_button(ui, &mut nav, Nav::Library, "📚   Library") {
                     activated = Some(Nav::Library);
                 }
@@ -1247,7 +1244,8 @@ impl App {
                     egui::vec2(left_width, 30.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        ui.add_space(10.0);
+                        // The panel frame already provides the same 8px margin
+                        // the content below uses, so don't add more.
                         if ui
                             .add_enabled(
                                 !matches!(self.view, View::Search) || self.prev_sections.is_some(),
@@ -1293,7 +1291,7 @@ impl App {
                     egui::vec2(right_width, 30.0),
                     Layout::right_to_left(Align::Center),
                     |ui| {
-                        ui.add_space(10.0);
+                        // Same margin as the rest of the panel; no extra inset.
                         // In a right-to-left layout the first widget is the
                         // rightmost, so the gear is placed first and the spinner
                         // sits to its left with a gap between them.
@@ -1464,7 +1462,7 @@ impl App {
                 ui,
                 &self.thumbnails,
                 &items,
-                196.0,
+                168.0,
                 current_video.as_deref(),
             ) {
                 *action = activate(&items, idx);
@@ -1570,7 +1568,7 @@ impl App {
                 ui,
                 &self.thumbnails,
                 &shelf.items,
-                196.0,
+                168.0,
                 current_video.as_deref(),
             ) {
                 *action = activate(&shelf.items, idx);

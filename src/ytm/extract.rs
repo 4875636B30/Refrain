@@ -9,6 +9,9 @@ use serde_json::Value;
 
 use super::domain::{ItemKind, Page, PageKind, SearchItem, Shelf, Track};
 
+/// Tile artwork renders around 160px, so ask for a source near that.
+const THUMBNAIL_TARGET: u32 = 220;
+
 /// Collect every value stored under `name` anywhere in the tree.
 pub fn find_renderers<'a>(v: &'a Value, name: &str) -> Vec<&'a Value> {
     let mut out = Vec::new();
@@ -87,28 +90,41 @@ pub fn text(v: &Value) -> String {
     String::new()
 }
 
-/// Largest thumbnail URL nested anywhere inside `v`.
-pub fn largest_thumbnail(v: &Value) -> Option<String> {
-    let mut best: Option<(u32, String)> = None;
-    for tr in find_renderers(v, "musicThumbnailRenderer") {
-        if let Some(thumbs) = tr
+/// Pick a thumbnail close to `target` pixels wide: the smallest one that is at
+/// least `target`, otherwise the largest available. Asking for the biggest
+/// (544px) wastes bandwidth when tiles render at ~160px.
+pub fn thumbnail_for(v: &Value, target: u32) -> Option<String> {
+    let mut smallest_big_enough: Option<(u32, String)> = None;
+    let mut largest: Option<(u32, String)> = None;
+
+    for renderer in find_renderers(v, "musicThumbnailRenderer") {
+        let Some(thumbs) = renderer
             .get("thumbnail")
             .and_then(|t| t.get("thumbnails"))
             .and_then(Value::as_array)
-        {
-            for t in thumbs {
-                let url = t.get("url").and_then(Value::as_str).unwrap_or_default();
-                let w = t.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
-                if url.is_empty() {
-                    continue;
-                }
-                if best.as_ref().map(|(bw, _)| w > *bw).unwrap_or(true) {
-                    best = Some((w, url.to_string()));
-                }
+        else {
+            continue;
+        };
+        for thumb in thumbs {
+            let url = thumb.get("url").and_then(Value::as_str).unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            let width = thumb.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+            if largest.as_ref().is_none_or(|(best, _)| width > *best) {
+                largest = Some((width, url.to_string()));
+            }
+            if width >= target
+                && smallest_big_enough
+                    .as_ref()
+                    .is_none_or(|(best, _)| width < *best)
+            {
+                smallest_big_enough = Some((width, url.to_string()));
             }
         }
     }
-    best.map(|(_, u)| u)
+
+    smallest_big_enough.or(largest).map(|(_, url)| url)
 }
 
 /// Parse `m:ss` or `h:mm:ss` into seconds.
@@ -322,7 +338,7 @@ pub fn parse_track(item: &Value) -> Option<Track> {
         artist_ids: artist_ids_from_runs(&subtitle_runs),
         album: album_from_runs(&subtitle_runs),
         duration_secs: duration_from(item, &cols),
-        thumbnail: largest_thumbnail(item),
+        thumbnail: thumbnail_for(item, THUMBNAIL_TARGET),
     })
 }
 
@@ -385,7 +401,7 @@ fn parse_search_item(item: &Value) -> Option<SearchItem> {
         kind,
         browse_id,
         video_id,
-        thumbnail: largest_thumbnail(item),
+        thumbnail: thumbnail_for(item, THUMBNAIL_TARGET),
         duration_secs: duration_from(item, &cols),
     })
 }
@@ -437,7 +453,7 @@ pub fn parse_two_row_item(item: &Value) -> Option<SearchItem> {
         kind,
         browse_id,
         video_id: watch_id,
-        thumbnail: largest_thumbnail(item),
+        thumbnail: thumbnail_for(item, THUMBNAIL_TARGET),
         duration_secs: None,
     })
 }
@@ -600,7 +616,7 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         if let Some(ds) = find_first(h, "musicDescriptionShelfRenderer") {
             description = ds.get("description").map(text).unwrap_or_default();
         }
-        thumbnail = largest_thumbnail(h);
+        thumbnail = thumbnail_for(h, THUMBNAIL_TARGET);
         // Album/single pages carry the artist here rather than on each row.
         header_artist = ["straplineTextOne", "straplineTextTwo"]
             .iter()
