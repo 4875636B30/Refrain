@@ -276,6 +276,7 @@ Verified working:
 - [x] Thumbs up / down, read from the watch-next response and written back
       through InnerTube's `like` endpoints (signed in)
 - [x] Desktop media controls (MPRIS, media keys, `playerctl`), via souvlaki
+- [x] Right-click a track to add it to a playlist, or create one on the spot
 - [x] Release bundle with `yt-dlp` shipped beside the binary
 - [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family

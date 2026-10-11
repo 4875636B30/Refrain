@@ -99,6 +99,10 @@ pub struct Page {
     pub track_count: Option<usize>,
     /// Raw playlist id, for paging long track lists via the player panel.
     pub playlist_id: Option<String>,
+    /// Whether the signed-in user may edit this playlist. YouTube Music marks
+    /// that by using an editable header renderer instead of a plain one, so a
+    /// missing marker reads as "not editable" — the safe direction.
+    pub editable: bool,
 }
 
 impl Page {

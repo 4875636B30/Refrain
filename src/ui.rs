@@ -308,6 +308,8 @@ pub struct RowOutcome {
     pub hovered: bool,
     /// A linked name inside the row (artist or album) was clicked.
     pub link: Option<String>,
+    /// "Add to playlist" was chosen from the row's context menu.
+    pub add_to_playlist: bool,
 }
 
 /// YouTube Music marks the playing row with a small equaliser where the track
@@ -442,10 +444,22 @@ pub fn list_row(
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+
+    // Right-click menu. Kept to what the app can actually do: a menu that
+    // offers things which do nothing is worse than no menu.
+    let mut add_to_playlist = false;
+    response.context_menu(|ui| {
+        if ui.button("Add to playlist…").clicked() {
+            add_to_playlist = true;
+            ui.close();
+        }
+    });
+
     RowOutcome {
         clicked: response.clicked(),
         hovered,
         link,
+        add_to_playlist,
     }
 }
 

@@ -721,6 +721,7 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         continuation,
         track_count,
         playlist_id,
+        editable: is_editable(v),
     }
 }
 
@@ -744,6 +745,11 @@ pub fn parse_like_status(v: &Value) -> (LikeStatus, bool) {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     (status, allowed)
+}
+
+/// Whether a page's header marks it as editable by the current user.
+pub fn is_editable(v: &Value) -> bool {
+    find_first(v, "musicEditablePlaylistDetailHeaderRenderer").is_some()
 }
 
 #[cfg(test)]

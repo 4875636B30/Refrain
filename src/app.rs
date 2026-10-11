@@ -58,6 +58,10 @@ enum Msg {
     CacheIdle,
     /// A request from the desktop's media controls (media keys, panel, MPRIS).
     Media(media::Command),
+    /// The user's playlists, for the picker.
+    Playlists(Result<Vec<(String, String)>, String>),
+    /// A playlist edit finished; the string is what to tell the user.
+    PlaylistEdited(Result<String, String>),
     /// The rating for a track, read from the watch-next response.
     LikeStatus {
         video_id: String,
@@ -135,6 +139,11 @@ enum Action {
     },
     /// Page in the rest of a long track list.
     LoadMoreTracks,
+    /// Open the "add to playlist" picker for a track.
+    AddToPlaylist {
+        video_id: String,
+        title: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -185,6 +194,37 @@ enum Repeat {
     Off,
     All,
     One,
+}
+
+/// The user's playlists, as (browse id, title), from the library page.
+///
+/// "Liked Music" is an auto playlist driven by ratings rather than a real list,
+/// so it is left out — adding to it is not how a track gets liked.
+fn playlists_from(page: &Page) -> Vec<(String, String)> {
+    page.shelves
+        .iter()
+        .flat_map(|shelf| shelf.items.iter())
+        .filter(|item| item.kind == ItemKind::Playlist)
+        .filter(|item| !item.subtitle.to_lowercase().contains("auto playlist"))
+        .filter_map(|item| {
+            item.browse_id
+                .as_ref()
+                .map(|id| (id.clone(), item.title.clone()))
+        })
+        .collect()
+}
+
+/// The "add to playlist" dialog.
+struct Picker {
+    video_id: String,
+    title: String,
+    /// The user's playlists as (browse id, title); `None` until loaded.
+    playlists: Option<Vec<(String, String)>>,
+    /// What is being typed into the "new playlist" field.
+    new_name: String,
+    /// Progress or failure, shown in the dialog.
+    note: Option<String>,
+    busy: bool,
 }
 
 /// What should follow the current track when it ends.
@@ -398,6 +438,8 @@ pub struct App {
     last_prune: Instant,
     /// Whether the "Up next" queue panel is showing.
     show_queue: bool,
+    /// The "add to playlist" picker, when it is open.
+    picker: Option<Picker>,
     /// Desktop media controls, if the desktop has any.
     media: media::Controls,
     /// The track the desktop is currently showing.
@@ -588,6 +630,7 @@ impl App {
             cache_inflight: Arc::new(Mutex::new(HashSet::new())),
             last_prune: Instant::now(),
             show_queue: false,
+            picker: None,
             media,
             media_for: None,
             last_media_push: Instant::now(),
@@ -1153,6 +1196,7 @@ impl App {
 
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
+            Action::AddToPlaylist { video_id, title } => self.open_picker(ctx, video_id, title),
             Action::Open(id) => self.open_page(ctx, id),
             Action::PlayQueueIndex(idx) => self.play_index(ctx, idx),
             Action::PlayList { tracks, index } => {
@@ -1534,6 +1578,31 @@ impl App {
                     self.pump_cache_worker(ctx);
                 }
                 Msg::Media(command) => self.handle_media_command(ctx, command),
+                Msg::Playlists(result) => {
+                    if let Some(picker) = self.picker.as_mut() {
+                        match result {
+                            Ok(list) => picker.playlists = Some(list),
+                            Err(e) => {
+                                picker.note = Some(e);
+                                picker.busy = false;
+                            }
+                        }
+                    }
+                }
+                Msg::PlaylistEdited(result) => match result {
+                    Ok(message) => {
+                        // Done with the dialog; say what happened in the status
+                        // line rather than leaving a window open.
+                        self.picker = None;
+                        self.status = Some(message);
+                    }
+                    Err(e) => {
+                        if let Some(picker) = self.picker.as_mut() {
+                            picker.note = Some(e);
+                            picker.busy = false;
+                        }
+                    }
+                },
                 Msg::LikeStatus { video_id, result } => {
                     self.like_inflight = false;
                     match result {
@@ -2161,7 +2230,14 @@ impl App {
                 item.playable(),
                 item.navigable(),
             );
-            if let Some(id) = row.link {
+            if row.add_to_playlist {
+                if let Some(video_id) = item.video_id.clone() {
+                    *action = Some(Action::AddToPlaylist {
+                        video_id,
+                        title: item.title.clone(),
+                    });
+                }
+            } else if let Some(id) = row.link {
                 // An artist/album name inside the row opens that page.
                 *action = Some(Action::Open(id));
             } else if row.hovered {
@@ -2209,7 +2285,12 @@ impl App {
                 true,
                 false,
             );
-            if let Some(id) = row.link {
+            if row.add_to_playlist {
+                *action = Some(Action::AddToPlaylist {
+                    video_id: track.video_id.clone(),
+                    title: track.title.clone(),
+                });
+            } else if let Some(id) = row.link {
                 *action = Some(Action::Open(id));
             } else if row.hovered {
                 *hovered = Some(track.clone());
@@ -2260,6 +2341,167 @@ impl App {
             ) {
                 *action = activate(&shelf.items, idx);
             }
+        }
+    }
+
+    /// Open the "add to playlist" dialog for a track.
+    fn open_picker(&mut self, ctx: &egui::Context, video_id: String, title: String) {
+        if !self.authenticated {
+            self.status = Some("Sign in to save tracks to a playlist".to_string());
+            return;
+        }
+        let needs_list = self.picker.is_none();
+        self.picker = Some(Picker {
+            video_id,
+            title,
+            playlists: None,
+            new_name: String::new(),
+            note: None,
+            busy: false,
+        });
+        if needs_list {
+            self.spawn_playlists(ctx);
+        }
+    }
+
+    fn spawn_playlists(&mut self, ctx: &egui::Context) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .browse("FEmusic_liked_playlists")
+                .await
+                .map(|page| playlists_from(&page))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Playlists(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_add_to_playlist(
+        &mut self,
+        ctx: &egui::Context,
+        playlist_id: String,
+        video_id: String,
+    ) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .add_to_playlist(&playlist_id, &video_id)
+                .await
+                .map(|()| "Added to playlist".to_string())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::PlaylistEdited(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_create_and_add(&mut self, ctx: &egui::Context, name: String, video_id: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = async {
+                let playlist_id = client.create_playlist(&name).await?;
+                client.add_to_playlist(&playlist_id, &video_id).await?;
+                Ok(format!("Created “{name}” and added the track"))
+            }
+            .await
+            .map_err(|e: anyhow::Error| e.to_string());
+            let _ = tx.send(Msg::PlaylistEdited(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Draw the picker, if it is open.
+    fn playlist_picker(&mut self, ctx: &egui::Context) {
+        let Some(mut picker) = self.picker.take() else {
+            return;
+        };
+
+        let mut keep_open = true;
+        let mut chosen: Option<String> = None;
+        let mut create_new = false;
+
+        egui::Window::new("Add to playlist")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                ui.label(RichText::new(&picker.title).strong());
+                ui.add_space(6.0);
+                ui.separator();
+
+                match &picker.playlists {
+                    None => {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Loading your playlists…").weak());
+                        ui.add_space(6.0);
+                    }
+                    Some(list) if list.is_empty() => {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("No playlists yet — name one below.").weak());
+                        ui.add_space(6.0);
+                    }
+                    Some(list) => {
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                for (id, title) in list {
+                                    if ui
+                                        .add_enabled(!picker.busy, egui::Button::new(title))
+                                        .clicked()
+                                    {
+                                        chosen = Some(id.clone());
+                                    }
+                                }
+                            });
+                    }
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut picker.new_name)
+                            .hint_text("New playlist")
+                            .desired_width(190.0),
+                    );
+                    if ui
+                        .add_enabled(!picker.busy, egui::Button::new("Create"))
+                        .clicked()
+                    {
+                        create_new = true;
+                    }
+                });
+
+                if let Some(note) = &picker.note {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(note).weak().small());
+                }
+            });
+
+        if let Some(id) = chosen {
+            picker.busy = true;
+            picker.note = Some("Adding…".to_string());
+            self.spawn_add_to_playlist(ctx, id, picker.video_id.clone());
+        } else if create_new {
+            let name = picker.new_name.trim().to_string();
+            if name.is_empty() {
+                picker.note = Some("Give the playlist a name first.".to_string());
+            } else {
+                picker.busy = true;
+                picker.note = Some("Creating…".to_string());
+                self.spawn_create_and_add(ctx, name, picker.video_id.clone());
+            }
+        }
+
+        if keep_open {
+            self.picker = Some(picker);
         }
     }
 
@@ -2656,6 +2898,7 @@ impl eframe::App for App {
         self.tick_deferred_play(&ctx);
         self.tick_like_status(&ctx);
         self.tick_media();
+        self.playlist_picker(&ctx);
         self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);

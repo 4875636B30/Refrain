@@ -413,6 +413,7 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
     println!("tracks: {}", page.tracks.len());
     println!("track count (header): {:?}", page.track_count);
     println!("has more tracks: {}", page.has_more_tracks());
+    println!("editable: {}", page.editable);
     for t in page.tracks.iter().take(3) {
         println!("   - {} — {}", t.title, t.artist_line());
     }
@@ -484,8 +485,11 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
         println!("   [{}] {} items", shelf.title, shelf.items.len());
         for item in shelf.items.iter().take(3) {
             println!(
-                "       {:?}  {}  —  {}",
-                item.kind, item.title, item.subtitle
+                "       {:?}  {}  —  {}  [{}]",
+                item.kind,
+                item.title,
+                item.subtitle,
+                item.browse_id.as_deref().unwrap_or("-")
             );
         }
     }

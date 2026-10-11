@@ -221,6 +221,42 @@ impl Client {
         Ok(extract::parse_like_status(&value))
     }
 
+    /// Create a playlist, returning its id.
+    ///
+    /// Private, which is what YouTube Music's own "New playlist" creates.
+    pub async fn create_playlist(&self, title: &str) -> Result<String> {
+        let value = self
+            .post(
+                "playlist/create",
+                json!({ "title": title, "privacyStatus": "PRIVATE" }),
+            )
+            .await?;
+        value
+            .get("playlistId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("playlist/create returned no playlistId")
+    }
+
+    /// Add a track to a playlist.
+    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<()> {
+        self.edit_playlist(
+            playlist_id,
+            json!([{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }]),
+        )
+        .await
+    }
+
+    /// Apply edits to a playlist. Every mutation goes through here.
+    async fn edit_playlist(&self, playlist_id: &str, actions: Value) -> Result<()> {
+        self.post(
+            "browse/edit_playlist",
+            json!({ "playlistId": bare_playlist_id(playlist_id), "actions": actions }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Set or clear the rating for a track.
     pub async fn set_like(&self, video_id: &str, status: LikeStatus) -> Result<()> {
         let endpoint = match status {
@@ -290,4 +326,27 @@ impl Client {
 pub struct MoreShelves {
     pub shelves: Vec<Shelf>,
     pub continuation: Option<String>,
+}
+
+/// Playlists arrive as browse ids (`VLPL…`) but the editing endpoints take the
+/// bare id (`PL…`). Sending the wrong one is a silent no-op, so it happens in
+/// one place and is tested.
+fn bare_playlist_id(id: &str) -> &str {
+    id.strip_prefix("VL").unwrap_or(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bare_playlist_id;
+
+    #[test]
+    fn playlist_ids_lose_only_their_browse_prefix() {
+        assert_eq!(bare_playlist_id("VLPLabc123"), "PLabc123");
+        // Already bare: unchanged.
+        assert_eq!(bare_playlist_id("PLabc123"), "PLabc123");
+        // A "VL" inside the id is part of the id.
+        assert_eq!(bare_playlist_id("VLPLaVLb"), "PLaVLb");
+        // Album browse ids are not playlists and must not be mangled.
+        assert_eq!(bare_playlist_id("MPREb_x"), "MPREb_x");
+    }
 }
