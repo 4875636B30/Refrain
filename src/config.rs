@@ -1,4 +1,4 @@
-//! Persistent configuration (`~/.config/youtube-music-rs/config.toml`).
+//! Persistent configuration (`~/.config/refrain/config.toml`).
 
 use std::path::PathBuf;
 
@@ -6,19 +6,48 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub fn project_dirs() -> Option<directories::ProjectDirs> {
-    directories::ProjectDirs::from("", "", "youtube-music-rs")
+    directories::ProjectDirs::from("", "", "refrain")
 }
 
-pub fn config_dir() -> PathBuf {
+/// One-time move of settings and cache from the project's previous name, so the
+/// rename doesn't lose anyone's config, cookies or play counts.
+fn migrate_legacy_dirs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(legacy) = directories::ProjectDirs::from("", "", "youtube-music-rs") else {
+            return;
+        };
+        for (old, new) in [
+            (legacy.config_dir().to_path_buf(), config_dir_raw()),
+            (legacy.cache_dir().to_path_buf(), cache_dir_raw()),
+        ] {
+            if !new.exists() && old.exists() {
+                let _ = std::fs::rename(&old, &new);
+            }
+        }
+    });
+}
+
+fn config_dir_raw() -> PathBuf {
     project_dirs()
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn cache_dir() -> PathBuf {
+fn cache_dir_raw() -> PathBuf {
     project_dirs()
         .map(|d| d.cache_dir().to_path_buf())
         .unwrap_or_else(std::env::temp_dir)
+}
+
+pub fn config_dir() -> PathBuf {
+    migrate_legacy_dirs();
+    config_dir_raw()
+}
+
+pub fn cache_dir() -> PathBuf {
+    migrate_legacy_dirs();
+    cache_dir_raw()
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

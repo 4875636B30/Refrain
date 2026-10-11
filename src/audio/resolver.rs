@@ -3,7 +3,7 @@
 //! `yt-dlp` owns the fragile work of YouTube signature/`n`-param deciphering.
 //! We ask it for the best audio stream and let ffmpeg normalise it to `m4a`
 //! (AAC), which `rodio`/symphonia can decode. Results are cached under
-//! `~/.cache/youtube-music-rs/audio/<video_id>.m4a`, so replaying a track is
+//! `~/.cache/refrain/audio/<video_id>.m4a`, so replaying a track is
 //! instant and seeking works.
 
 use std::path::{Path, PathBuf};
@@ -204,7 +204,7 @@ pub async fn download_track(video_id: &str, auth: &crate::config::AuthConfig) ->
             bail!(
                 "YouTube refused anonymous access to this track (bot check). Sign into \
                  music.youtube.com in your browser, or set a cookie source in \
-                 ~/.config/youtube-music-rs/config.toml."
+                 ~/.config/refrain/config.toml."
             );
         }
         bail!("yt-dlp failed for {video_id}: {last}");

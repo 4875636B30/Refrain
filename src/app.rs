@@ -217,7 +217,7 @@ fn empty_state(ui: &mut egui::Ui, busy: bool) {
             RichText::new(if busy {
                 "Searching…"
             } else {
-                "Search YouTube Music to get started."
+                "Search for music to get started."
             })
             .weak(),
         );
@@ -1177,7 +1177,7 @@ impl App {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
-                    ui.label(RichText::new("♪  YouTube Music").size(15.0).strong());
+                    ui.label(RichText::new("♪  Refrain").size(15.0).strong());
                 });
                 ui.add_space(12.0);
                 if nav_button(ui, &mut nav, Nav::Home, "🏠   Home") {

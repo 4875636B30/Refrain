@@ -1,7 +1,12 @@
 [package]
-name = "youtube-music-rs"
+name = "refrain"
 version = "0.1.0"
 edition = "2024"
+description = "A fast, low-memory desktop client for YouTube Music"
+license = "MIT"
+readme = "README.md"
+keywords = ["music", "youtube", "egui", "audio", "player"]
+categories = ["multimedia::audio", "gui"]
 
 [dependencies]
 anyhow = "1.0.104"

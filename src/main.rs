@@ -1,4 +1,4 @@
-//! A desktop YouTube Music client built with egui.
+//! Refrain — a fast, low-memory desktop client for YouTube Music.
 
 mod app;
 mod audio;
@@ -152,12 +152,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 740.0])
             .with_min_inner_size([820.0, 520.0])
-            .with_title("YouTube Music"),
+            .with_title("Refrain"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "YouTube Music",
+        "Refrain",
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)?))),
     )

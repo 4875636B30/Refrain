@@ -1,7 +1,7 @@
-# youtube-music-rs
+# Refrain
 
-A desktop **YouTube Music** client written in Rust, using [`egui`](https://github.com/emilk/egui)
-for the UI and [`rodio`](https://github.com/RustAudio/rodio) for playback.
+A fast, low-memory desktop client for **YouTube Music**, written in Rust with
+[`egui`](https://github.com/emilk/egui) and [`rodio`](https://github.com/RustAudio/rodio).
 
 Search the catalogue, open albums / artists / playlists, and play tracks — with
 or without signing in.
@@ -17,7 +17,7 @@ src/
   main.rs              eframe bootstrap + `--probe`/`--download`/`--auth-check`/
                        `--page`/`--thumb` debug modes
   app.rs               app state, background tasks, egui UI
-  config.rs            ~/.config/youtube-music-rs/config.toml
+  config.rs            ~/.config/refrain/config.toml
   auth.rs              cookie extraction, SAPISIDHASH, browser auto-detect
   thumbs.rs            artwork fetch (reqwest) + decode (image)
   ui.rs                theme + reusable widgets (cover grid, list rows)
@@ -59,13 +59,13 @@ yt-dlp handles YouTube's media-request requirements — headers, IP binding,
 rotating hosts and expiring URLs. Fetching those URLs directly produced
 intermittent HTTP 403s.
 
-- The stream is mirrored into `~/.cache/youtube-music-rs/audio/<video_id>.m4a`,
+- The stream is mirrored into `~/.cache/refrain/audio/<video_id>.m4a`,
   so repeats play straight from disk.
 - Streams are opened **ahead of time** — when a page or search loads, after
   hovering a track for ~150 ms, and for the next track in the queue — so
   pressing play starts in milliseconds instead of waiting on yt-dlp.
 - The two tracks you play most are warmed at startup. Ranking comes from local
-  play counts (`~/.config/youtube-music-rs/plays.tsv`); with none recorded yet,
+  play counts (`~/.config/refrain/plays.tsv`); with none recorded yet,
   your YouTube Music history is used, most recent first.
 - If no `m4a` stream is offered, playback falls back to the download path, where
   ffmpeg transcodes.
@@ -149,7 +149,7 @@ cargo run -- --auth-check --refresh
 
 ## Configuration
 
-`~/.config/youtube-music-rs/config.toml` (created once you change a setting):
+`~/.config/refrain/config.toml` (created once you change a setting):
 
 ```toml
 [auth]
