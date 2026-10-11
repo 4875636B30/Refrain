@@ -26,7 +26,7 @@ src/
     extract.rs         tolerant renderer-tree walking + parsing
     domain.rs          clean domain types (Track, Page, SearchItem)
   audio/
-    resolver.rs        yt-dlp: stream args + cached downloads
+    resolver.rs        yt-dlp: stream args, URL resolution + ranged fetches
     stream.rs          yt-dlp stdout + seekable buffer (streaming playback)
     engine.rs          rodio playback (play/pause/seek/volume)
 ```
@@ -52,18 +52,29 @@ Pressing play runs `yt-dlp -f bestaudio[ext=m4a] -o -` and reads the media from
 its **stdout**. `RemoteSource` presents that pipe to `rodio` as a `Read + Seek`
 by buffering everything from offset 0 in a background thread, so playback starts
 as soon as the first bytes arrive instead of after a full download — and seeking
-works even though a pipe isn't seekable.
+works even though a pipe isn't seekable. That pipe is also the safety net: if
+anything in the faster path below fails, playback still works.
 
-Going through yt-dlp (rather than fetching a resolved `googlevideo` URL) means
-yt-dlp handles YouTube's media-request requirements — headers, IP binding,
-rotating hosts and expiring URLs. Fetching those URLs directly produced
-intermittent HTTP 403s.
+**Resolving is yt-dlp's job; fetching is ours.** A `googlevideo` URL can't be
+had without solving YouTube's JS signature challenge, so `yt-dlp -g` does the
+resolving (about 6 s). Fetching that URL, though, turned out not to be the
+fragile thing it first looked like:
 
-- The stream is mirrored into `~/.cache/refrain/audio/<video_id>.m4a`,
-  so repeats play straight from disk.
-- Streams are opened **ahead of time** — when a page or search loads, after
-  hovering a track for ~150 ms, and for the next track in the queue — so
-  pressing play starts in milliseconds instead of waiting on yt-dlp.
+- Fetch it with an explicit `Range` header. Without one YouTube throttles the
+  *same* URL to ~33 KB/s — which presents as a stall or a 403, and is what made
+  direct fetching look unreliable. With one, a whole track arrives in about a
+  second at 5–9 MB/s.
+- Any user agent works; the request isn't bound to the client that resolved it.
+- Resolved URLs are reused for ~5 h, so fetching a track again skips `yt-dlp`
+  entirely.
+- Audio is mirrored into `~/.cache/refrain/audio/<video_id>.m4a`, so repeats
+  play straight from disk.
+- Opening a page resolves and caches the first several tracks in the background
+  (each is ~1 s of work once resolved), hovering a track for ~150 ms warms it,
+  and starting a track queues the next few.
+- Streams are additionally opened **ahead of time** — when a page or search
+  loads, after a hover, and for the next track in the queue — so pressing play
+  starts in milliseconds instead of waiting on yt-dlp.
 - The two tracks you play most are warmed at startup. Ranking comes from local
   play counts (`~/.config/refrain/plays.tsv`); with none recorded yet,
   your YouTube Music history is used, most recent first.
@@ -75,9 +86,9 @@ The one unavoidable cost is the first `yt-dlp` extraction for a track (roughly
 That work is moved off the critical path by prefetching, so it only shows up if
 you click a track you never hovered and whose page never warmed it.
 
-Fetching the stream ourselves is not an option: every InnerTube client that can
-play returns `signatureCipher` URLs, so it would mean reimplementing YouTube's
-JS signature deciphering — the part yt-dlp exists to maintain.
+Getting the URL without yt-dlp is still not an option: every InnerTube client
+that can play returns `signatureCipher` URLs, so it would mean reimplementing
+YouTube's JS signature deciphering — the part yt-dlp exists to maintain.
 
 ### Memory
 
@@ -220,6 +231,8 @@ Verified working:
 - [x] Browsable carousels — artist albums/singles/videos, featured playlists, related artists
 - [x] **Streaming playback** via a `yt-dlp` stdout pipe (`RemoteSource`), with
       on-disk write-through, next-track prefetch and a download fallback
+- [x] Resolve-then-fetch: `yt-dlp -g` supplies the URL, but the media is fetched
+      by us with a `Range` header (~1 s per track) and reused for ~5 h
 - [x] Playback UI: centred transport controls, custom seek bar, volume
 - [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family

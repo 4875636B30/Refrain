@@ -9,8 +9,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -28,6 +28,7 @@ enum Msg {
     Page(Result<Page, String>),
     Downloaded {
         video_id: String,
+        url: Option<String>,
         result: Result<PathBuf, String>,
     },
     Auth(Result<Option<ResolvedAuth>, String>),
@@ -51,6 +52,8 @@ enum Msg {
         browse_id: String,
         result: Result<Vec<Track>, String>,
     },
+    /// The background cache worker drained its queue.
+    CacheIdle,
     /// The account's listening history, used to warm likely tracks.
     History(Result<Vec<Track>, String>),
     Image {
@@ -312,6 +315,11 @@ pub struct App {
     current: Option<usize>,
     pending_play: Option<Track>,
     downloading: HashSet<String>,
+    /// Resolved stream URLs, reusable for a few hours.
+    url_cache: HashMap<String, (String, Instant)>,
+    /// Tracks queued for background resolve-and-cache.
+    cache_queue: Arc<Mutex<VecDeque<String>>>,
+    cache_worker_busy: bool,
     /// Streams opened ahead of the click (most recent last).
     prefetched: Vec<PrefetchedStream>,
     /// How often each track has been played here, so favourites get warmed.
@@ -459,6 +467,9 @@ impl App {
             current: None,
             pending_play: None,
             downloading: HashSet::new(),
+            url_cache: HashMap::new(),
+            cache_queue: Arc::new(Mutex::new(VecDeque::new())),
+            cache_worker_busy: false,
             prefetched: Vec::new(),
             play_counts: load_play_counts(),
             history: Vec::new(),
@@ -729,6 +740,67 @@ impl App {
         });
     }
 
+    /// A stream URL resolved recently enough to still be valid.
+    fn cached_url(&self, video_id: &str) -> Option<String> {
+        self.url_cache.get(video_id).and_then(|(url, at)| {
+            // YouTube URLs live about six hours; stay well clear.
+            (at.elapsed() < Duration::from_secs(5 * 3600)).then(|| url.clone())
+        })
+    }
+
+    /// Queue tracks to be resolved and cached in the background.
+    ///
+    /// A whole track downloads in under a second once its URL is known, so this
+    /// is cheap per track; the expensive part is the URL resolution.
+    fn enqueue_cache(&mut self, ctx: &egui::Context, video_ids: Vec<String>) {
+        for video_id in video_ids {
+            if resolver::cache_path(&video_id).exists() || self.downloading.contains(&video_id) {
+                continue;
+            }
+            let mut queue = self.cache_queue.lock().unwrap();
+            if !queue.contains(&video_id) {
+                queue.push_back(video_id);
+            }
+        }
+        self.pump_cache_worker(ctx);
+    }
+
+    fn pump_cache_worker(&mut self, ctx: &egui::Context) {
+        if self.cache_worker_busy || self.cache_queue.lock().unwrap().is_empty() {
+            return;
+        }
+        self.cache_worker_busy = true;
+        let queue = Arc::clone(&self.cache_queue);
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let auth = self.auth.clone();
+        // Only the tracks currently queued, with whatever URLs we already have.
+        let queued: Vec<String> = self.cache_queue.lock().unwrap().iter().cloned().collect();
+        let urls: HashMap<String, String> = queued
+            .into_iter()
+            .filter_map(|video_id| self.cached_url(&video_id).map(|url| (video_id, url)))
+            .collect();
+        self.rt.spawn(async move {
+            loop {
+                let Some(video_id) = queue.lock().unwrap().pop_front() else {
+                    break;
+                };
+                let known = urls.get(&video_id).cloned();
+                let (url, result) = resolver::resolve_and_fetch(&video_id, &auth, known).await;
+                let result = result.map_err(|e| e.to_string());
+
+                let _ = tx.send(Msg::Downloaded {
+                    video_id,
+                    url,
+                    result,
+                });
+                ctx.request_repaint();
+            }
+            let _ = tx.send(Msg::CacheIdle);
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_download(&mut self, ctx: &egui::Context, video_id: String) {
         if !self.downloading.insert(video_id.clone()) {
             return; // already in flight
@@ -736,11 +808,15 @@ impl App {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         let auth = self.auth.clone();
+        let cached = self.cached_url(&video_id);
         self.rt.spawn(async move {
-            let result = resolver::download_track(&video_id, &auth)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Downloaded { video_id, result });
+            let (url, result) = resolver::resolve_and_fetch(&video_id, &auth, cached).await;
+            let result = result.map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Downloaded {
+                video_id,
+                url,
+                result,
+            });
             ctx.request_repaint();
         });
     }
@@ -786,6 +862,15 @@ impl App {
         if let Some(next) = self.queue.get(idx + 1).cloned() {
             self.prefetch(ctx, &next);
         }
+        // And cache the few after that; a URL plus a ranged fetch is cheap.
+        let upcoming: Vec<String> = self
+            .queue
+            .iter()
+            .skip(idx + 1)
+            .take(4)
+            .map(|track| track.video_id.clone())
+            .collect();
+        self.enqueue_cache(ctx, upcoming);
     }
 
     fn play_path(&mut self, path: &Path, track: Track) {
@@ -1023,6 +1108,14 @@ impl App {
                     self.current = None;
                     self.advance_armed = false;
                     let warm: Vec<Track> = page.tracks.iter().take(2).cloned().collect();
+                    // Also resolve-and-cache the first few: each is under a
+                    // second of work once its URL is known, and it persists.
+                    let to_cache: Vec<String> = page
+                        .tracks
+                        .iter()
+                        .take(6)
+                        .map(|track| track.video_id.clone())
+                        .collect();
                     // Feeds page in their shelves; album/playlist pages don't.
                     let next = if page.browse_id.starts_with("FEmusic") {
                         page.continuation.clone()
@@ -1038,6 +1131,7 @@ impl App {
                     for track in &warm {
                         self.prefetch(ctx, track);
                     }
+                    self.enqueue_cache(ctx, to_cache);
                     if let Some(token) = next {
                         self.more_rounds = 1;
                         self.spawn_more_shelves(ctx, browse_id, token);
@@ -1053,8 +1147,16 @@ impl App {
                     self.busy = false;
                     self.status = Some(format!("Could not open page: {e}"));
                 }
-                Msg::Downloaded { video_id, result } => {
+                Msg::Downloaded {
+                    video_id,
+                    url,
+                    result,
+                } => {
                     self.downloading.remove(&video_id);
+                    if let Some(url) = url {
+                        self.url_cache
+                            .insert(video_id.clone(), (url, Instant::now()));
+                    }
                     let is_pending = self
                         .pending_play
                         .as_ref()
@@ -1248,6 +1350,10 @@ impl App {
                     if let Some((browse_id, playlist_id, anchor)) = next_anchor {
                         self.spawn_more_tracks(ctx, browse_id, playlist_id, anchor);
                     }
+                }
+                Msg::CacheIdle => {
+                    self.cache_worker_busy = false;
+                    self.pump_cache_worker(ctx);
                 }
                 Msg::Image { uri, result } => {
                     self.thumb_inflight.remove(&uri);

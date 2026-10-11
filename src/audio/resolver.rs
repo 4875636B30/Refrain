@@ -142,6 +142,139 @@ pub fn stream_args(video_id: &str, auth: &crate::config::AuthConfig) -> Vec<Stri
     args
 }
 
+/// User agent for direct media fetches. Any agent works — unlike the API, the
+/// media request isn't bound to the client that resolved it.
+const FETCH_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
+
+/// Resolve a direct, range-capable audio URL with `yt-dlp -g`.
+///
+/// This still costs a few seconds (YouTube's URLs are ciphered and need solving),
+/// but everything after it — fetching, caching, replaying — is ours.
+pub async fn resolve_url(video_id: &str, auth: &crate::config::AuthConfig) -> Result<String> {
+    let ytdlp = locate_ytdlp().context("yt-dlp not found")?;
+
+    let mut args: Vec<String> = Vec::new();
+    args.extend(js_runtime_args());
+    args.extend(auth.ytdlp_args());
+    args.extend([
+        "-f".to_string(),
+        "bestaudio[ext=m4a]/bestaudio".to_string(),
+        "--no-playlist".to_string(),
+        "--no-warnings".to_string(),
+        "--no-progress".to_string(),
+        "-g".to_string(),
+        format!("https://www.youtube.com/watch?v={video_id}"),
+    ]);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        Command::new(&ytdlp).args(&args).output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("yt-dlp timed out resolving the URL"))?
+    .context("spawning yt-dlp")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "could not resolve {video_id}: {}",
+            stderr.trim().lines().last().unwrap_or("unknown error")
+        );
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !url.starts_with("http") {
+        bail!("yt-dlp returned no URL for {video_id}");
+    }
+    Ok(url)
+}
+
+/// Download a resolved URL straight into the audio cache.
+///
+/// The explicit `Range` header matters: YouTube throttles un-ranged media
+/// requests (we measured a full track at 33 KB/s without it, and 5–9 MB/s
+/// with), which is what made fetching direct URLs look unreliable.
+pub async fn fetch_audio(url: &str, video_id: &str) -> Result<PathBuf> {
+    let dest = cache_path(video_id);
+    if is_cached(&dest) {
+        return Ok(dest);
+    }
+
+    let dir = cache_dir();
+    std::fs::create_dir_all(&dir).context("creating audio cache directory")?;
+    let scratch = dir.join(format!(".{video_id}.fetch"));
+
+    let http = reqwest::Client::builder()
+        .user_agent(FETCH_USER_AGENT)
+        .build()
+        .context("building HTTP client")?;
+
+    let response = http
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-")
+        .send()
+        .await
+        .context("requesting audio")?;
+
+    if !response.status().is_success() {
+        // A rejected URL is usually one that has expired.
+        let _ = std::fs::remove_file(&scratch);
+        bail!("audio request returned HTTP {}", response.status());
+    }
+
+    let bytes = response.bytes().await.context("reading audio body")?;
+    if bytes.len() < 16 * 1024 {
+        let _ = std::fs::remove_file(&scratch);
+        bail!("audio response was only {} bytes", bytes.len());
+    }
+
+    std::fs::write(&scratch, &bytes).context("writing cached audio")?;
+    std::fs::rename(&scratch, &dest).context("moving audio into cache")?;
+    Ok(dest)
+}
+
+/// Resolve and cache a track, reusing a known URL when it still works.
+///
+/// Prefers our own ranged fetch (a whole track lands in about a second) and
+/// falls back to yt-dlp's downloader if the URL is rejected. Returns the URL
+/// that was used, so callers can keep it for later.
+pub async fn resolve_and_fetch(
+    video_id: &str,
+    auth: &crate::config::AuthConfig,
+    known_url: Option<String>,
+) -> (Option<String>, Result<PathBuf>) {
+    let mut url = match known_url {
+        Some(url) => Some(url),
+        None => resolve_url(video_id, auth).await.ok(),
+    };
+
+    let mut result = match &url {
+        Some(url) => fetch_audio(url, video_id).await,
+        None => Err(anyhow::anyhow!("could not resolve a stream URL")),
+    };
+
+    // A rejected URL is usually simply expired, so try one fresh resolve
+    // before falling back to the slower path.
+    if result.is_err()
+        && let Ok(fresh) = resolve_url(video_id, auth).await
+    {
+        url = Some(fresh.clone());
+        result = fetch_audio(&fresh, video_id).await;
+    }
+
+    if result.is_err() {
+        result = download_track(video_id, auth).await;
+    }
+
+    (url, result)
+}
+
 /// Download and cache a track's audio. Returns the path to the playable file.
 pub async fn download_track(video_id: &str, auth: &crate::config::AuthConfig) -> Result<PathBuf> {
     let dest = cache_path(video_id);

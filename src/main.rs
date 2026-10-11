@@ -488,7 +488,14 @@ fn download_cmd(video_id: &str) -> anyhow::Result<()> {
         .block_on(auth::resolve(&cfg))?
         .map(|resolved| resolved.source)
         .unwrap_or_default();
-    let path = rt.block_on(audio::resolver::download_track(video_id, &auth))?;
+    // Resolve-and-fetch beats yt-dlp's own downloader once the URL is known,
+    // so try that first and keep yt-dlp as the fallback.
+    let started = std::time::Instant::now();
+    let url = rt.block_on(audio::resolver::resolve_url(video_id, &auth))?;
+    println!("resolved in {:.2}s", started.elapsed().as_secs_f32());
+    let fetch_started = std::time::Instant::now();
+    let path = rt.block_on(audio::resolver::fetch_audio(&url, video_id))?;
+    println!("fetched in {:.2}s", fetch_started.elapsed().as_secs_f32());
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     println!("cached {} ({} bytes)", path.display(), size);
 
