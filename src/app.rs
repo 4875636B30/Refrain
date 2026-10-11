@@ -147,6 +147,8 @@ pub struct App {
 
     query: String,
     filter: SearchFilter,
+    /// Last query run, so it can be repeated once sign-in completes.
+    last_search: Option<(String, SearchFilter)>,
     nav: Nav,
     theme_light: bool,
     theme_applied: bool,
@@ -245,6 +247,7 @@ impl App {
             deferred_play: None,
             query: String::new(),
             filter: SearchFilter::All,
+            last_search: None,
             nav: Nav::Home,
             theme_light,
             theme_applied: false,
@@ -284,6 +287,7 @@ impl App {
         }
         self.busy = true;
         self.status = Some(format!("Searching “{query}”…"));
+        self.last_search = Some((query.clone(), self.filter));
         let client = self.client.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -646,6 +650,15 @@ impl App {
                             }
                         }
                     }
+                    // Repeat the last search: anonymous ranking differs a lot
+                    // from signed-in ranking (the top result changes).
+                    if self.authenticated && matches!(self.view, View::Search) {
+                        if let Some((query, filter)) = self.last_search.clone() {
+                            self.query = query;
+                            self.filter = filter;
+                            self.run_search(ctx);
+                        }
+                    }
                     // Play whatever the user asked for before sign-in finished.
                     if let Some(idx) = self.deferred_play.take() {
                         self.play_index(ctx, idx);
@@ -897,6 +910,9 @@ impl App {
                     go_back = true;
                 }
                 ui.add_space(4.0);
+                // Centre the search cluster in the space that's left.
+                let cluster = 360.0 + 46.0 + 140.0 + 90.0 + 24.0;
+                ui.add_space(((ui.available_width() - cluster) / 2.0).max(0.0));
                 if ui::search_bar(ui, &mut self.query, 360.0) {
                     do_search = true;
                 }

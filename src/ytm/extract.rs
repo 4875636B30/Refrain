@@ -557,6 +557,7 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
     let mut subtitle = String::new();
     let mut description = String::new();
     let mut thumbnail = None;
+    let mut header_artist: Option<String> = None;
     if let Some(h) = header {
         title = h.get("title").map(text).unwrap_or_default();
         subtitle = h
@@ -568,17 +569,37 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
             description = ds.get("description").map(text).unwrap_or_default();
         }
         thumbnail = largest_thumbnail(h);
+        // Album/single pages carry the artist here rather than on each row.
+        header_artist = ["straplineTextOne", "straplineTextTwo"]
+            .iter()
+            .find_map(|key| h.get(*key))
+            .map(text)
+            .filter(|name| !name.trim().is_empty());
     }
+
+    let kind = page_kind(browse_id);
 
     let mut tracks: Vec<Track> = Vec::new();
     collect_tracks(v, &mut tracks);
+    // Album rows often omit the artist (implied) and the artwork, so fill the
+    // gaps from the header instead of showing "Unknown artist" and blanks.
+    for track in &mut tracks {
+        if track.artists.is_empty() && kind == PageKind::Album {
+            if let Some(artist) = &header_artist {
+                track.artists = vec![artist.clone()];
+            }
+        }
+        if track.thumbnail.is_none() {
+            track.thumbnail = thumbnail.clone();
+        }
+    }
 
     let shelves = parse_shelves(v);
     let continuation = parse_continuation(v);
 
     Page {
         browse_id: browse_id.to_string(),
-        kind: page_kind(browse_id),
+        kind,
         title: if title.is_empty() {
             friendly_title(browse_id)
         } else {

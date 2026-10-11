@@ -33,6 +33,20 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // `--search <query>` prints parsed search results in order.
+    if let Some(pos) = args.iter().position(|a| a == "--search") {
+        let query = args.get(pos + 1).cloned().unwrap_or_default();
+        if query.is_empty() {
+            eprintln!("usage: --search <query>");
+            std::process::exit(2);
+        }
+        if let Err(e) = search_cmd(&query) {
+            eprintln!("search failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // `--play-local <path>` plays a local file muted (isolates device vs stream).
     if let Some(pos) = args.iter().position(|a| a == "--play-local") {
         let path = args.get(pos + 1).cloned().unwrap_or_default();
@@ -186,6 +200,25 @@ fn auth_check() -> anyhow::Result<()> {
             "InnerTube   : anonymous ❌  — sign into music.youtube.com in your browser, then re-run"
         ),
         Err(e) => println!("InnerTube   : request failed: {e}"),
+    }
+    Ok(())
+}
+
+fn search_cmd(query: &str) -> anyhow::Result<()> {
+    use ytm::SearchFilter;
+
+    let cfg = config::Config::load();
+    let rt = tokio::runtime::Runtime::new()?;
+    let jar = rt.block_on(auth::resolve(&cfg)).ok().flatten().map(|r| r.jar);
+    let client = ytm::Client::new("en", "US", jar)?;
+
+    let items = rt.block_on(client.search(query, SearchFilter::All))?;
+    println!("{} items (All filter)", items.len());
+    for (i, item) in items.iter().enumerate() {
+        println!(
+            "  {i:2}  {:?}  {:<44}  {}",
+            item.kind, item.title, item.subtitle
+        );
     }
     Ok(())
 }
