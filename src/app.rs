@@ -887,6 +887,7 @@ impl App {
 
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("search_filter")
+                    .width(132.0)
                     .selected_text(self.filter.label())
                     .show_ui(ui, |ui| {
                         for option in SearchFilter::ALL_FILTERS {
@@ -1081,6 +1082,7 @@ impl App {
                 let total = audio.total.map(|d| d.as_secs_f32()).unwrap_or(0.0);
                 let pos = audio.position().as_secs_f32();
                 let paused = audio.is_paused();
+                let has_track = audio.now_playing.is_some();
                 let row_height = 56.0;
 
                 ui.horizontal(|ui| {
@@ -1117,16 +1119,19 @@ impl App {
                             let spacing = ui.spacing().item_spacing.x;
                             let buttons = 34.0 + 48.0 + 34.0 + spacing * 2.0;
                             ui.add_space(((centre_width - buttons) / 2.0).max(0.0));
-                            if ui::round_button(ui, "⏮", 34.0, false).clicked() {
-                                step = -1;
-                            }
-                            let glyph = if paused { "▶" } else { "⏸" };
-                            if ui::round_button(ui, glyph, 48.0, true).clicked() {
-                                toggle_pause = true;
-                            }
-                            if ui::round_button(ui, "⏭", 34.0, false).clicked() {
-                                step = 1;
-                            }
+                            // Transport is inert until something is loaded.
+                            ui.add_enabled_ui(has_track, |ui| {
+                                if ui::round_button(ui, "⏮", 34.0, false).clicked() {
+                                    step = -1;
+                                }
+                                let glyph = if !has_track || paused { "▶" } else { "⏸" };
+                                if ui::round_button(ui, glyph, 48.0, true).clicked() {
+                                    toggle_pause = true;
+                                }
+                                if ui::round_button(ui, "⏭", 34.0, false).clicked() {
+                                    step = 1;
+                                }
+                            });
                         },
                     );
 
