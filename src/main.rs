@@ -33,6 +33,34 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // `--play-local <path>` plays a local file muted (isolates device vs stream).
+    if let Some(pos) = args.iter().position(|a| a == "--play-local") {
+        let path = args.get(pos + 1).cloned().unwrap_or_default();
+        if path.is_empty() {
+            eprintln!("usage: --play-local <path>");
+            std::process::exit(2);
+        }
+        if let Err(e) = play_local_cmd(&path) {
+            eprintln!("play-local failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--play-test <video_id>` exercises the exact in-app playback path, muted.
+    if let Some(pos) = args.iter().position(|a| a == "--play-test") {
+        let id = args.get(pos + 1).cloned().unwrap_or_default();
+        if id.is_empty() {
+            eprintln!("usage: --play-test <video_id>");
+            std::process::exit(2);
+        }
+        if let Err(e) = play_test_cmd(&id) {
+            eprintln!("play-test failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // `--stream <video_id>` verifies streaming and reports time-to-first-audio.
     if let Some(pos) = args.iter().position(|a| a == "--stream") {
         let id = args.get(pos + 1).cloned().unwrap_or_default();
@@ -162,6 +190,74 @@ fn auth_check() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn play_local_cmd(path: &str) -> anyhow::Result<()> {
+    let mut engine = audio::AudioEngine::new()?;
+    engine.set_volume(0.0);
+    let track = ytm::Track {
+        video_id: "local".to_string(),
+        title: "local".to_string(),
+        ..Default::default()
+    };
+    let t = std::time::Instant::now();
+    engine.play_file(std::path::Path::new(path), track)?;
+    println!("play_file returned in {:?}", t.elapsed());
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    println!(
+        "after 3s: playing={} pos={:?} total={:?}",
+        engine.is_playing(),
+        engine.position(),
+        engine.total
+    );
+    engine.stop();
+    Ok(())
+}
+
+/// Exercise the app's real playback path (AudioEngine + RemoteSource), muted so
+/// it doesn't make noise.
+fn play_test_cmd(video_id: &str) -> anyhow::Result<()> {
+    use rodio::Source as _;
+
+    let cfg = config::Config::load();
+    let rt = tokio::runtime::Runtime::new()?;
+    let auth = rt
+        .block_on(auth::resolve(&cfg))?
+        .map(|resolved| resolved.source)
+        .unwrap_or_default();
+
+    let mut engine = audio::AudioEngine::new()?;
+    engine.set_volume(0.0);
+
+    let args = audio::resolver::stream_args(video_id, &auth);
+    let cache = Some(audio::resolver::cache_path(video_id));
+
+    let started = std::time::Instant::now();
+    let source = audio::stream::RemoteSource::new(args, cache)?;
+    let decoder = rodio::Decoder::new(source)?;
+    println!(
+        "decoded in {:?} (total {:?})",
+        started.elapsed(),
+        decoder.total_duration()
+    );
+
+    let track = ytm::Track {
+        video_id: video_id.to_string(),
+        title: "play-test".to_string(),
+        ..Default::default()
+    };
+    engine.play_decoder(decoder, track)?;
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    println!(
+        "after 3s: playing={} pos={:?} total={:?} finished={}",
+        engine.is_playing(),
+        engine.position(),
+        engine.total,
+        engine.finished()
+    );
+    engine.stop();
+    Ok(())
+}
+
 fn stream_cmd(video_id: &str) -> anyhow::Result<()> {
     use rodio::Source as _;
 
@@ -172,22 +268,24 @@ fn stream_cmd(video_id: &str) -> anyhow::Result<()> {
         .map(|resolved| resolved.source)
         .unwrap_or_default();
 
-    let t_resolve = std::time::Instant::now();
-    let url = rt.block_on(audio::resolver::resolve_stream_url(video_id, &auth))?;
-    println!("url resolved in {:?}", t_resolve.elapsed());
+    let args = audio::resolver::stream_args(video_id, &auth);
+    let cache = Some(audio::resolver::cache_path(video_id));
 
-    let t_start = std::time::Instant::now();
-    let source = audio::stream::RemoteSource::new(url, None);
+    let started = std::time::Instant::now();
+    let source = audio::stream::RemoteSource::new(args, cache)?;
     let decoder = rodio::Decoder::new(source)?;
-    let duration = decoder.total_duration();
-    println!("decoder opened in {:?} (total {:?})", t_start.elapsed(), duration);
+    println!(
+        "decoder opened in {:?} (total {:?})",
+        started.elapsed(),
+        decoder.total_duration()
+    );
 
-    let t_first = std::time::Instant::now();
+    let first = std::time::Instant::now();
     let mut decoder = decoder;
     let samples = decoder.by_ref().take(44_100 * 2).count(); // ~1s stereo
     println!(
         "first ~1s of audio decoded after {:?} ({} samples)",
-        t_first.elapsed(),
+        first.elapsed(),
         samples
     );
     Ok(())

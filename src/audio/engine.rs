@@ -56,15 +56,13 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Stream from a remote source, starting playback as soon as data arrives.
-    pub fn play_remote(
+    /// Play an already-opened stream (see [`crate::audio::stream::RemoteSource`]).
+    pub fn play_decoder(
         &mut self,
-        source: crate::audio::stream::RemoteSource,
+        decoder: rodio::Decoder<crate::audio::stream::RemoteSource>,
         track: Track,
     ) -> Result<()> {
         self.stop();
-
-        let decoder = rodio::Decoder::new(source).context("decoding remote stream")?;
         self.total = decoder.total_duration();
 
         let player = Player::connect_new(self.device.mixer());

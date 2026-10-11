@@ -1,55 +1,58 @@
-//! Range-streaming reader for YouTube audio.
+//! Streaming playback source.
 //!
-//! `yt-dlp -g` yields a direct `googlevideo` URL that supports HTTP range
-//! requests, and YouTube's `m4a` streams put the `moov` atom first — so a
-//! decoder can start after a few hundred KB instead of the whole file. This
-//! reader presents that stream to `rodio` as an ordinary `Read + Seek`, while a
-//! background thread keeps a look-ahead window filled and mirrors the bytes
-//! into the on-disk cache.
+//! We run `yt-dlp -o -` and read the media from its stdout. Going through
+//! yt-dlp (rather than fetching a resolved URL ourselves) means it handles all
+//! of YouTube's media-request requirements — headers, IP binding, rotating
+//! hosts and expiring URLs — which a hand-rolled HTTP fetch gets wrong (we saw
+//! intermittent 403s).
 //!
-//! Everything is buffered from offset 0, so seeking backwards is free and there
-//! is no restart thrashing (individual tracks are only a few MB).
+//! The pipe is not seekable, so a background thread buffers everything from
+//! offset 0. That suits `rodio`, which wants `Read + Seek`: backwards seeks are
+//! served from memory and forwards seeks simply wait for the buffered data to
+//! catch up. Bytes are mirrored into the on-disk cache as they arrive.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-/// How far ahead of the read cursor the background thread tries to stay.
-const READAHEAD: u64 = 2 * 1024 * 1024;
-/// Bytes requested per ranged HTTP call.
-const CHUNK: u64 = 256 * 1024;
-/// Bytes buffered before publishing to the reader, so playback can begin after
-/// the first network round trip rather than a whole chunk.
+use anyhow::{Context, Result};
+
+/// Bytes published to the reader at a time.
 const SUB_CHUNK: usize = 32 * 1024;
-
-const USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
 
 struct Window {
     data: Vec<u8>,
     read_pos: u64,
-    total: Option<u64>,
     done: bool,
     error: Option<String>,
 }
 
-/// A lazily-streamed remote audio file.
+/// A streaming, seekable view over a `yt-dlp` subprocess.
 pub struct RemoteSource {
     window: Arc<Mutex<Window>>,
     stop: Arc<AtomicBool>,
 }
 
 impl RemoteSource {
-    /// Start streaming `url`. Returns immediately; the body is fetched in the
-    /// background. If `cache` is given, the stream is also written there so the
-    /// next play is instant.
-    pub fn new(url: String, cache: Option<PathBuf>) -> Self {
+    /// Spawn `yt-dlp` with `args` and stream its stdout. Returns immediately.
+    pub fn new(args: Vec<String>, cache: Option<PathBuf>) -> Result<Self> {
+        let ytdlp = crate::audio::resolver::locate_ytdlp()
+            .context("yt-dlp not found, so streaming playback is unavailable")?;
+
+        let mut child = Command::new(ytdlp)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawning yt-dlp for streaming")?;
+        let stdout = child.stdout.take().context("capturing yt-dlp stdout")?;
+
         let window = Arc::new(Mutex::new(Window {
             data: Vec::new(),
             read_pos: 0,
-            total: None,
             done: false,
             error: None,
         }));
@@ -59,10 +62,10 @@ impl RemoteSource {
         let thread_stop = Arc::clone(&stop);
         std::thread::Builder::new()
             .name("ytm-stream".into())
-            .spawn(move || prefetch(url, cache, thread_window, thread_stop))
-            .expect("spawning stream thread");
+            .spawn(move || prefetch(child, stdout, cache, thread_window, thread_stop))
+            .context("spawning stream reader thread")?;
 
-        Self { window, stop }
+        Ok(Self { window, stop })
     }
 }
 
@@ -94,8 +97,8 @@ impl Read for RemoteSource {
                     return Ok(0); // clean EOF
                 }
             }
-            // Not enough buffered yet: let the prefetcher catch up.
-            std::thread::sleep(Duration::from_millis(5));
+            // Wait for the download to reach us.
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }
@@ -103,7 +106,7 @@ impl Read for RemoteSource {
 impl Seek for RemoteSource {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let mut window = self.window.lock().unwrap();
-        let end = window.total.unwrap_or(window.data.len() as u64) as i64;
+        let end = window.data.len() as i64;
         let target = match pos {
             SeekFrom::Start(n) => n as i64,
             SeekFrom::End(n) => end + n,
@@ -120,21 +123,14 @@ impl Seek for RemoteSource {
     }
 }
 
-/// Background prefetcher: fills the window and mirrors bytes into the cache.
+/// Reads the subprocess output into the window (and the cache file).
 fn prefetch(
-    url: String,
+    mut child: Child,
+    mut stdout: impl Read,
     cache: Option<PathBuf>,
     window: Arc<Mutex<Window>>,
     stop: Arc<AtomicBool>,
 ) {
-    let client = match reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => return fail(&window, format!("http client: {e}")),
-    };
-
     let cache_paths = cache.map(|final_path| {
         let scratch = final_path.with_extension("part");
         (scratch, final_path)
@@ -143,85 +139,41 @@ fn prefetch(
         .as_ref()
         .and_then(|(scratch, _)| std::fs::File::create(scratch).ok());
 
-    let mut next: u64 = 0;
     let mut buffer = vec![0u8; SUB_CHUNK];
-
-    'outer: loop {
+    let mut complete = false;
+    loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-
-        let (read_pos, have, done) = {
-            let window = window.lock().unwrap();
-            (window.read_pos, window.data.len() as u64, window.done)
-        };
-        if done {
-            break;
-        }
-        if have >= read_pos + READAHEAD {
-            std::thread::sleep(Duration::from_millis(25));
-            continue;
-        }
-        next = next.max(have);
-
-        let range = format!("bytes={}-{}", next, next + CHUNK - 1);
-        let response = match client.get(&url).header("Range", range).send() {
-            Ok(response) if response.status().is_success() => response,
-            Ok(response) => {
-                return fail(&window, format!("HTTP {} fetching audio", response.status()));
+        match stdout.read(&mut buffer) {
+            Ok(0) => {
+                complete = true;
+                break;
             }
-            Err(e) => return fail(&window, format!("request failed: {e}")),
-        };
-
-        // A 200 to a ranged request means the server ignored the range; that is
-        // only safe when we are still at the start of the file.
-        if response.status().as_u16() == 200 && next > 0 {
-            return fail(&window, "server ignored range request".to_string());
-        }
-
-        let total = response
-            .headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.rsplit('/').next())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .or_else(|| response.content_length());
-        {
-            let mut window = window.lock().unwrap();
-            if window.total.is_none() {
-                window.total = total;
-            }
-        }
-
-        let mut limited = response.take(CHUNK);
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break 'outer;
-            }
-            let n = match limited.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) => {
-                    return fail(&window, format!("read failed: {e}"));
+            Ok(n) => {
+                if let Some(file) = file.as_mut() {
+                    let _ = file.write_all(&buffer[..n]);
                 }
-            };
-            if let Some(file) = file.as_mut() {
-                let _ = file.write_all(&buffer[..n]);
+                window.lock().unwrap().data.extend_from_slice(&buffer[..n]);
             }
-            window.lock().unwrap().data.extend_from_slice(&buffer[..n]);
-            next += n as u64;
+            Err(e) => {
+                window.lock().unwrap().error = Some(format!("stream read failed: {e}"));
+                break;
+            }
         }
     }
+    window.lock().unwrap().done = true;
 
-    // Finished (or stopped) — publish a complete file into the cache.
+    // Stop yt-dlp if we bailed out early (track changed, app closing…).
+    let _ = child.kill();
+    let _ = child.wait();
+
     drop(file);
-    if window.lock().unwrap().error.is_none() {
-        if let Some((scratch, final_path)) = cache_paths {
+    if let Some((scratch, final_path)) = cache_paths {
+        if complete && window.lock().unwrap().error.is_none() {
             let _ = std::fs::rename(&scratch, &final_path);
+        } else {
+            let _ = std::fs::remove_file(&scratch);
         }
     }
-}
-
-fn fail(window: &Arc<Mutex<Window>>, message: String) {
-    window.lock().unwrap().error = Some(message);
 }

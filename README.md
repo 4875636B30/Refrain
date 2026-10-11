@@ -26,8 +26,8 @@ src/
     extract.rs         tolerant renderer-tree walking + parsing
     domain.rs          clean domain types (Track, Page, SearchItem)
   audio/
-    resolver.rs        yt-dlp: stream URL resolution + cached downloads
-    stream.rs          range-streaming Read+Seek reader with prefetch
+    resolver.rs        yt-dlp: stream args + cached downloads
+    stream.rs          yt-dlp stdout + seekable buffer (streaming playback)
     engine.rs          rodio playback (play/pause/seek/volume)
 ```
 
@@ -41,20 +41,26 @@ wrappers are simply skipped, so the client keeps working when the layout shifts.
 
 ### Playback & streaming
 
-Pressing play **streams** rather than downloading first. `yt-dlp -g` resolves a
-range-capable `googlevideo` URL; `RemoteSource` presents it to `rodio` as a
-`Read + Seek` backed by a background look-ahead buffer, so audio starts as soon
-as the first bytes land (~0.3 s) instead of after a multi-megabyte download.
+Pressing play runs `yt-dlp -f bestaudio[ext=m4a] -o -` and reads the media from
+its **stdout**. `RemoteSource` presents that pipe to `rodio` as a `Read + Seek`
+by buffering everything from offset 0 in a background thread, so playback starts
+as soon as the first bytes arrive instead of after a full download — and seeking
+works even though a pipe isn't seekable.
 
-- Resolved URLs are cached for a few hours, and the **next** track's URL is
-  resolved ahead of time — so repeats and track changes start almost instantly.
+Going through yt-dlp (rather than fetching a resolved `googlevideo` URL) means
+yt-dlp handles YouTube's media-request requirements — headers, IP binding,
+rotating hosts and expiring URLs. Fetching those URLs directly produced
+intermittent HTTP 403s.
+
 - The stream is mirrored into `~/.cache/youtube-music-rs/audio/<video_id>.m4a`,
-  so later plays come straight off disk.
-- If no `m4a` stream is offered (or the URL expires), playback falls back to the
-  download path, where ffmpeg transcodes to `m4a`.
+  so repeats play straight from disk.
+- The **next** track in the queue is downloaded in the background, making track
+  changes instant.
+- If no `m4a` stream is offered, playback falls back to the download path, where
+  ffmpeg transcodes.
 
-The first resolve of a given track still costs a few seconds of `yt-dlp` work,
-because YouTube's JS challenges have to be solved.
+The first play of a given track still waits a few seconds while `yt-dlp` solves
+YouTube's JS challenges before it emits any audio.
 
 ### UI
 
@@ -75,6 +81,14 @@ Cookies are reused for two independent jobs:
 To avoid re-implementing browser cookie decryption, we drive
 `yt-dlp --cookies-from-browser` to materialise a `cookies.txt`, then parse it.
 Both jobs share that one extraction.
+
+On Linux, Chromium-family cookies are encrypted with a key held in the OS
+keyring, and yt-dlp guesses which keyring from `XDG_CURRENT_DESKTOP`. That guess
+is unreliable — and `BASICTEXT` in particular silently fails to decrypt the
+`v11` cookies (you get a handful of cookies and no `SAPISID`). So this client
+tries `GNOMEKEYRING`, `KWALLET6`, `KWALLET` and `BASICTEXT` explicitly, keeps
+whichever yields a `SAPISID`, and remembers it. Pin one with the `keyring`
+config option if you prefer.
 
 ## Requirements
 
@@ -158,14 +172,15 @@ Verified working:
 - [x] Filtered search (All / Songs / Albums / Artists / Playlists)
 - [x] Album, playlist and artist detail pages with artwork
 - [x] Browsable carousels — artist albums/singles/videos, featured playlists, related artists
-- [x] **Streaming playback** (range-based, `~0.3 s` to first audio) with URL
-      caching, next-track prefetch, on-disk write-through and download fallback
-- [x] Playback UI: play/pause, prev/next, seek, volume, auto-advance
+- [x] **Streaming playback** via a `yt-dlp` stdout pipe (`RemoteSource`), with
+      on-disk write-through, next-track prefetch and a download fallback
+- [x] Playback UI: centred transport controls, custom seek bar, volume
 - [x] Sidebar (Home / Search / Library), cover-art grids, dark + light themes
 - [x] Cookie extraction from Firefox (incl. XDG path) and Chromium-family
-      (incl. Flatpak), plus `cookies.txt` import
+      (incl. Flatpak), with automatic keyring selection, plus `cookies.txt` import
 - [x] `SAPISIDHASH`-authenticated InnerTube requests
 - [x] Library and Home feeds
+- [x] Artwork fetched and decoded off the UI thread (no window freezes)
 
 When several browsers are present, `auto` picks the first one that actually has
 a **YouTube session**, so a logged-out Firefox won't shadow a signed-in Brave.

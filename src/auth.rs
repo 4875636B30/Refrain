@@ -138,6 +138,7 @@ pub fn cached_source() -> Option<AuthConfig> {
     let mut lines = text.lines();
     let browser = lines.next()?.trim().to_string();
     let profile = lines.next().unwrap_or("").trim().to_string();
+    let keyring = lines.next().unwrap_or("").trim().to_string();
     if browser.is_empty() {
         return None;
     }
@@ -148,7 +149,7 @@ pub fn cached_source() -> Option<AuthConfig> {
     Some(AuthConfig {
         mode: AuthMode::Browser,
         browser,
-        keyring: String::new(),
+        keyring,
         profile,
         cookies_file: String::new(),
     })
@@ -159,7 +160,10 @@ fn store_source(auth: &AuthConfig) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, format!("{}\n{}\n", auth.browser, auth.profile));
+    let _ = std::fs::write(
+        path,
+        format!("{}\n{}\n{}\n", auth.browser, auth.profile, auth.keyring),
+    );
 }
 
 /// Parse a Netscape-format `cookies.txt`, honouring the `#HttpOnly_` prefix.
@@ -248,6 +252,69 @@ pub struct ResolvedAuth {
     pub jar: CookieJar,
 }
 
+fn is_chromium(browser: &str) -> bool {
+    matches!(
+        browser,
+        "chrome" | "chromium" | "brave" | "edge" | "opera" | "vivaldi" | "whale"
+    )
+}
+
+/// Chromium browsers encrypt cookies with a key held in the OS keyring. yt-dlp
+/// guesses which keyring from the desktop environment, which is unreliable
+/// (e.g. when launched without `XDG_CURRENT_DESKTOP`) — and guessing
+/// `BASICTEXT` silently fails to decrypt most cookies. So we try them
+/// explicitly and remember whichever works.
+fn keyring_order() -> Vec<&'static str> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_uppercase();
+    if desktop.contains("KDE") {
+        vec!["KWALLET6", "KWALLET", "GNOMEKEYRING", "BASICTEXT"]
+    } else {
+        vec!["GNOMEKEYRING", "KWALLET6", "KWALLET", "BASICTEXT"]
+    }
+}
+
+/// The concrete sources to try for one browser: itself if a keyring is already
+/// set (or it isn't a Chromium browser), otherwise each keyring option.
+fn keyring_variants(source: &AuthConfig) -> Vec<AuthConfig> {
+    if !source.keyring.is_empty() || !is_chromium(&source.browser) {
+        return vec![source.clone()];
+    }
+    keyring_order()
+        .into_iter()
+        .map(|keyring| AuthConfig {
+            keyring: keyring.to_string(),
+            ..source.clone()
+        })
+        .collect()
+}
+
+/// Try a browser across its keyring options, preferring one that yields a
+/// usable `SAPISID`.
+async fn try_source(source: &AuthConfig) -> Option<ResolvedAuth> {
+    let mut fallback: Option<ResolvedAuth> = None;
+    for variant in keyring_variants(source) {
+        let Ok(cookies) = materialize(&variant).await else {
+            continue;
+        };
+        let jar = CookieJar::new(cookies);
+        if jar.has_sapisid() {
+            return Some(ResolvedAuth {
+                source: variant,
+                jar,
+            });
+        }
+        if fallback.is_none() {
+            fallback = Some(ResolvedAuth {
+                source: variant,
+                jar,
+            });
+        }
+    }
+    fallback
+}
+
 /// Resolve cookies according to the config.
 ///
 /// In `auto` mode we try each detected browser and prefer one that actually has
@@ -265,20 +332,16 @@ pub async fn resolve(config: &Config) -> Result<Option<ResolvedAuth>> {
             }))
         }
         AuthMode::Browser => {
-            let cookies = materialize(&config.auth).await?;
-            let jar = CookieJar::new(cookies);
-            if jar.has_youtube_session() {
-                return Ok(Some(ResolvedAuth {
-                    source: config.auth.clone(),
-                    jar,
-                }));
+            let configured = try_source(&config.auth).await;
+            if let Some(found) = &configured {
+                if found.jar.has_youtube_session() {
+                    store_source(&found.source);
+                    return Ok(configured);
+                }
             }
             match auto_resolve().await? {
                 Some(better) => Ok(Some(better)),
-                None => Ok(Some(ResolvedAuth {
-                    source: config.auth.clone(),
-                    jar,
-                })),
+                None => Ok(configured),
             }
         }
         AuthMode::Auto => auto_resolve().await,
@@ -290,9 +353,10 @@ pub async fn resolve(config: &Config) -> Result<Option<ResolvedAuth>> {
 /// A previously-successful browser is tried first so subsequent launches are
 /// fast.
 pub async fn auto_resolve() -> Result<Option<ResolvedAuth>> {
+    let cached = cached_source();
     let mut ordered: Vec<(String, PathBuf)> = Vec::new();
-    if let Some(cached) = cached_source() {
-        ordered.push((cached.browser.clone(), PathBuf::from(&cached.profile)));
+    if let Some(source) = &cached {
+        ordered.push((source.browser.clone(), PathBuf::from(&source.profile)));
     }
     for candidate in candidates() {
         if !ordered
@@ -305,27 +369,29 @@ pub async fn auto_resolve() -> Result<Option<ResolvedAuth>> {
 
     let mut fallback: Option<ResolvedAuth> = None;
     for (browser, profile) in ordered.into_iter().take(6) {
+        // Carry over a known-good keyring for the cached browser.
+        let keyring = cached
+            .as_ref()
+            .filter(|c| c.browser == browser)
+            .map(|c| c.keyring.clone())
+            .unwrap_or_default();
         let source = AuthConfig {
             mode: AuthMode::Browser,
             browser,
-            keyring: String::new(),
+            keyring,
             profile: profile.to_string_lossy().into_owned(),
             cookies_file: String::new(),
         };
-        let Ok(cookies) = materialize(&source).await else {
+        let Some(found) = try_source(&source).await else {
             continue;
         };
-        let jar = CookieJar::new(cookies);
-        let has_session = jar.has_youtube_session();
+        let has_session = found.jar.has_youtube_session();
         if fallback.is_none() {
-            fallback = Some(ResolvedAuth {
-                source: source.clone(),
-                jar: jar.clone(),
-            });
+            fallback = Some(found.clone());
         }
         if has_session {
-            store_source(&source);
-            return Ok(Some(ResolvedAuth { source, jar }));
+            store_source(&found.source);
+            return Ok(Some(found));
         }
     }
     Ok(fallback)

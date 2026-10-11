@@ -61,8 +61,112 @@ pub fn apply_theme(ctx: &egui::Context, light: bool) {
 
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        style.spacing.button_padding = egui::vec2(10.0, 5.0);
+        let radius = egui::CornerRadius::same(6);
+        for widget in [
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            widget.corner_radius = radius;
+        }
     });
+}
+
+/// A circular transport button; `primary` gets the accent fill.
+pub fn round_button(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    diameter: f32,
+    primary: bool,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::click());
+    let hovered = response.hovered();
+    let visuals = ui.visuals();
+
+    let (fill, color) = if primary {
+        (
+            if hovered {
+                ACCENT.gamma_multiply(1.25)
+            } else {
+                ACCENT
+            },
+            Color32::WHITE,
+        )
+    } else if hovered {
+        (visuals.widgets.hovered.bg_fill, visuals.text_color())
+    } else {
+        (Color32::TRANSPARENT, visuals.weak_text_color())
+    };
+
+    if fill != Color32::TRANSPARENT {
+        ui.painter()
+            .circle_filled(rect.center(), diameter / 2.0, fill);
+    }
+    // Optically centre the play triangle.
+    let nudge = if glyph == "▶" { diameter * 0.04 } else { 0.0 };
+    ui.painter().text(
+        rect.center() + egui::vec2(nudge, 0.0),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(diameter * 0.44),
+        color,
+    );
+
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// A slim draggable progress bar. Returns a new position when the user seeks.
+pub fn progress_bar(ui: &mut egui::Ui, pos: f32, total: f32) -> Option<f32> {
+    let width = ui.available_width();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, 16.0), egui::Sense::click_and_drag());
+    let thickness = 4.0;
+    let track = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - thickness / 2.0),
+        egui::vec2(width, thickness),
+    );
+    let active = response.hovered() || response.dragged();
+    let visuals = ui.visuals();
+
+    ui.painter().rect_filled(
+        track,
+        thickness / 2.0,
+        if active {
+            visuals.widgets.hovered.bg_fill
+        } else {
+            visuals.widgets.inactive.bg_fill
+        },
+    );
+
+    let fraction = if total > 0.0 {
+        (pos / total).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let handle_x = track.left() + width * fraction;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(track.min, egui::pos2(handle_x, track.max.y)),
+        thickness / 2.0,
+        ACCENT,
+    );
+    if active {
+        ui.painter()
+            .circle_filled(egui::pos2(handle_x, track.center().y), 6.0, ACCENT);
+    }
+
+    if total > 0.0 && (response.dragged() || response.clicked()) {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let fraction = ((pointer.x - track.left()) / width).clamp(0.0, 1.0);
+            return Some(fraction * total);
+        }
+    }
+    None
 }
 
 pub fn fmt_time(secs: f32) -> String {

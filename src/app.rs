@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use egui::{Align, Layout, RichText};
@@ -31,15 +31,20 @@ enum Msg {
         result: Result<PathBuf, String>,
     },
     Auth(Result<Option<ResolvedAuth>, String>),
-    Stream {
-        video_id: String,
-        result: Result<String, String>,
+    /// A stream has been opened and decoded (off the UI thread).
+    Decoded {
+        track: Track,
+        result: Result<rodio::Decoder<crate::audio::stream::RemoteSource>, String>,
     },
     Image {
         uri: String,
-        result: Result<Vec<u8>, String>,
+        result: Result<egui::ColorImage, String>,
     },
 }
+
+/// Simultaneous artwork downloads. Decoding happens off the UI thread, but this
+/// still avoids a thundering herd right after a page loads.
+const MAX_THUMB_INFLIGHT: usize = 6;
 
 /// Artwork is fetched with reqwest (the same stack used for the API) and
 /// uploaded as a texture, rather than relying on egui's built-in HTTP loader.
@@ -130,9 +135,6 @@ pub struct App {
     current: Option<usize>,
     pending_play: Option<Track>,
     downloading: HashSet<String>,
-    streaming: HashSet<String>,
-    /// Resolved stream URLs, valid for a few hours.
-    url_cache: HashMap<String, (String, Instant)>,
     advance_armed: bool,
 
     audio: Option<AudioEngine>,
@@ -165,6 +167,7 @@ impl App {
             .context("building image HTTP client")?;
 
         let ytdlp = resolver::locate_ytdlp();
+        resolver::clean_stale_parts();
         let status = if ytdlp.is_none() {
             Some(
                 "yt-dlp not found — playback is disabled. Install it or set YTDLP_PATH."
@@ -219,8 +222,6 @@ impl App {
             current: None,
             pending_play: None,
             downloading: HashSet::new(),
-            streaming: HashSet::new(),
-            url_cache: HashMap::new(),
             advance_armed: false,
             audio,
             audio_error,
@@ -265,20 +266,29 @@ impl App {
         });
     }
 
-    fn spawn_stream(&mut self, ctx: &egui::Context, video_id: String) {
-        if !self.streaming.insert(video_id.clone()) {
-            return;
-        }
+    /// Queue stream-URL resolution for tracks the user is likely to click, so
+    /// playback can start without waiting on yt-dlp.
+    /// Open a stream for `track` and decode it, off the UI thread.
+    ///
+    /// Starting a stream means waiting on `yt-dlp` (a few seconds), so the
+    /// blocking work happens on a plain thread and the decoded source is handed
+    /// back over the channel.
+    fn start_stream(&mut self, ctx: &egui::Context, track: Track) {
+        let args = resolver::stream_args(&track.video_id, &self.auth);
+        let cache = Some(resolver::cache_path(&track.video_id));
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        let auth = self.auth.clone();
-        self.rt.spawn(async move {
-            let result = resolver::resolve_stream_url(&video_id, &auth)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Stream { video_id, result });
-            ctx.request_repaint();
-        });
+        std::thread::Builder::new()
+            .name("ytm-decode".into())
+            .spawn(move || {
+                let result = match crate::audio::stream::RemoteSource::new(args, cache) {
+                    Ok(source) => rodio::Decoder::new(source).map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = tx.send(Msg::Decoded { track, result });
+                ctx.request_repaint();
+            })
+            .ok();
     }
 
     fn spawn_download(&mut self, ctx: &egui::Context, video_id: String) {
@@ -316,59 +326,16 @@ impl App {
         if path.exists() {
             self.pending_play = None;
             self.play_path(&path, track);
-        } else if let Some(url) = self.cached_url(&track.video_id) {
-            // Already resolved: start streaming immediately.
-            self.pending_play = None;
-            if !self.play_url(url, track.clone()) {
-                self.status = Some("Streaming failed — downloading…".to_string());
-                self.pending_play = Some(track.clone());
-                self.spawn_download(ctx, track.video_id.clone());
-            }
         } else {
-            self.status = Some(format!("Buffering “{}”…", track.title));
+            self.status = Some(format!("Starting stream for “{}”…", track.title));
             self.pending_play = Some(track.clone());
-            self.spawn_stream(ctx, track.video_id.clone());
+            self.start_stream(ctx, track);
         }
 
-        // Resolve the next track's URL ahead of time so advancing is instant.
+        // Fetch the next track in the background so advancing is instant.
         if let Some(next) = self.queue.get(idx + 1).cloned() {
-            if !resolver::cache_path(&next.video_id).exists()
-                && self.cached_url(&next.video_id).is_none()
-            {
-                self.spawn_stream(ctx, next.video_id.clone());
-            }
-        }
-    }
-
-    /// A stream URL resolved recently enough to still be valid.
-    fn cached_url(&self, video_id: &str) -> Option<String> {
-        self.url_cache.get(video_id).and_then(|(url, at)| {
-            // YouTube URLs expire after about six hours; stay well clear.
-            (at.elapsed() < Duration::from_secs(4 * 3600)).then(|| url.clone())
-        })
-    }
-
-    /// Start streaming an already-resolved URL. Returns false on failure.
-    fn play_url(&mut self, url: String, track: Track) -> bool {
-        let Some(audio) = self.audio.as_mut() else {
-            self.status = Some(
-                self.audio_error
-                    .clone()
-                    .unwrap_or_else(|| "Audio output unavailable".to_string()),
-            );
-            return false;
-        };
-        let cache = resolver::cache_path(&track.video_id);
-        let source = crate::audio::stream::RemoteSource::new(url, Some(cache));
-        match audio.play_remote(source, track) {
-            Ok(()) => {
-                self.status = None;
-                self.advance_armed = true;
-                true
-            }
-            Err(e) => {
-                self.status = Some(format!("Playback failed: {e}"));
-                false
+            if !resolver::cache_path(&next.video_id).exists() {
+                self.spawn_download(ctx, next.video_id.clone());
             }
         }
     }
@@ -422,6 +389,7 @@ impl App {
                     self.busy = false;
                     self.status = None;
                     self.view = View::Search;
+                    self.nav = Nav::Search;
                 }
                 Msg::Search(Err(e)) => {
                     self.busy = false;
@@ -506,12 +474,8 @@ impl App {
                         self.play_index(ctx, idx);
                     }
                 }
-                Msg::Stream { video_id, result } => {
-                    self.streaming.remove(&video_id);
-                    if let Ok(url) = &result {
-                        self.url_cache
-                            .insert(video_id.clone(), (url.clone(), Instant::now()));
-                    }
+                Msg::Decoded { track, result } => {
+                    let video_id = track.video_id.clone();
                     let is_pending = self
                         .pending_play
                         .as_ref()
@@ -519,19 +483,32 @@ impl App {
                         .unwrap_or(false);
                     if is_pending {
                         match result {
-                            Ok(url) => {
-                                let track = self.pending_play.clone().expect("pending track");
-                                if self.play_url(url, track) {
-                                    self.pending_play = None;
-                                } else {
-                                    self.status =
-                                        Some("Streaming failed — downloading…".to_string());
-                                    self.spawn_download(ctx, video_id);
+                            Ok(decoder) => {
+                                self.pending_play = None;
+                                match self.audio.as_mut() {
+                                    Some(audio) => match audio.play_decoder(decoder, track) {
+                                        Ok(()) => {
+                                            self.status = None;
+                                            self.advance_armed = true;
+                                        }
+                                        Err(e) => {
+                                            self.status = Some(format!("Playback failed: {e}"))
+                                        }
+                                    },
+                                    None => {
+                                        self.status = Some(
+                                            self.audio_error
+                                                .clone()
+                                                .unwrap_or_else(|| {
+                                                    "Audio output unavailable".to_string()
+                                                }),
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
-                                // No m4a stream available (or it expired):
-                                // fall back to the download path.
+                                // No streamable m4a, or yt-dlp/youtube refused:
+                                // fall back to the download+transcode path.
                                 self.status =
                                     Some(format!("Streaming unavailable ({e}) — downloading…"));
                                 self.spawn_download(ctx, video_id);
@@ -542,19 +519,12 @@ impl App {
                 Msg::Image { uri, result } => {
                     self.thumb_inflight.remove(&uri);
                     match result {
-                        Ok(bytes) => match thumbs::decode(&bytes) {
-                            Some(image) => {
-                                let texture = ctx.load_texture(
-                                    uri.clone(),
-                                    image,
-                                    egui::TextureOptions::LINEAR,
-                                );
-                                self.thumbnails.insert(uri, texture);
-                            }
-                            None => {
-                                self.thumb_failed.insert(uri);
-                            }
-                        },
+                        Ok(image) => {
+                            // Cheap now: the pixels are already decoded.
+                            let texture =
+                                ctx.load_texture(uri.clone(), image, egui::TextureOptions::LINEAR);
+                            self.thumbnails.insert(uri, texture);
+                        }
                         Err(e) => {
                             eprintln!("[thumb] failed {uri}: {e}");
                             self.thumb_failed.insert(uri);
@@ -614,6 +584,9 @@ impl App {
         }
 
         for uri in uris {
+            if self.thumb_inflight.len() >= MAX_THUMB_INFLIGHT {
+                break;
+            }
             if self.thumbnails.contains_key(&uri) || self.thumb_failed.contains(&uri) {
                 continue;
             }
@@ -624,7 +597,16 @@ impl App {
             let tx = self.tx.clone();
             let ctx = ctx.clone();
             self.rt.spawn(async move {
-                let result = thumbs::fetch(&http, &uri).await.map_err(|e| e.to_string());
+                // Decoding is CPU-heavy, so keep it off the UI thread (and off
+                // the async workers) to avoid freezing the window.
+                let result = match thumbs::fetch(&http, &uri).await {
+                    Ok(bytes) => tokio::task::spawn_blocking(move || thumbs::decode(&bytes))
+                        .await
+                        .ok()
+                        .flatten()
+                        .ok_or_else(|| "unsupported image format".to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
                 let _ = tx.send(Msg::Image { uri, result });
                 ctx.request_repaint();
             });
@@ -712,10 +694,12 @@ impl App {
                 {
                     go_back = true;
                 }
-                let edit = ui.add(
+                ui.add_space(6.0);
+                ui.label(RichText::new("🔍").weak());
+                let edit = ui.add_sized(
+                    egui::vec2(430.0, 30.0),
                     egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Search songs, albums, artists…")
-                        .desired_width(380.0),
+                        .hint_text("Search songs, albums, artists…"),
                 );
                 let submitted =
                     edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -880,81 +864,114 @@ impl App {
         let mut seek_to: Option<f32> = None;
         let mut volume = self.volume;
 
-        egui::Panel::bottom("player").show(ui, |ui| {
-            ui.add_space(6.0);
-            let Some(audio) = self.audio.as_ref() else {
-                ui.label(
-                    RichText::new(
-                        self.audio_error
-                            .clone()
-                            .unwrap_or_else(|| "Audio output unavailable".to_string()),
-                    )
-                    .weak(),
-                );
-                ui.add_space(6.0);
-                return;
-            };
-
-            ui.horizontal(|ui| {
-                if let Some(track) = &audio.now_playing {
-                    if track.thumbnail.is_some() {
-                        ui::draw_thumbnail(
-                            ui,
-                            track.thumbnail.as_deref(),
-                            &self.thumbnails,
-                            egui::vec2(46.0, 46.0),
-                            6.0,
+        egui::Panel::bottom("player")
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.add_space(8.0);
+                let Some(audio) = self.audio.as_ref() else {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new(
+                                self.audio_error
+                                    .clone()
+                                    .unwrap_or_else(|| "Audio output unavailable".to_string()),
+                            )
+                            .weak(),
                         );
-                    }
-                    ui.add_space(8.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&track.title).strong());
-                        ui.label(RichText::new(track.artist_line()).weak().small());
                     });
-                } else {
-                    ui.label(RichText::new("Nothing playing").weak());
-                }
+                    ui.add_space(8.0);
+                    return;
+                };
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_sized(
-                        egui::vec2(96.0, 18.0),
-                        egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+                let total = audio.total.map(|d| d.as_secs_f32()).unwrap_or(0.0);
+                let pos = audio.position().as_secs_f32();
+                let paused = audio.is_paused();
+                let row_height = 56.0;
+
+                ui.horizontal(|ui| {
+                    // Left: artwork and titles.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(320.0, row_height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            if let Some(track) = &audio.now_playing {
+                                ui::draw_thumbnail(
+                                    ui,
+                                    track.thumbnail.as_deref(),
+                                    &self.thumbnails,
+                                    egui::vec2(48.0, 48.0),
+                                    6.0,
+                                );
+                                ui.add_space(10.0);
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(&track.title).strong());
+                                    ui.label(RichText::new(track.artist_line()).weak().small());
+                                });
+                            } else {
+                                ui.label(RichText::new("Nothing playing").weak());
+                            }
+                        },
                     );
-                    ui.label("🔊");
-                    ui.separator();
-                    if ui.button("⏭").clicked() {
-                        step = 1;
-                    }
-                    let label = if audio.is_paused() { "▶" } else { "⏸" };
-                    if ui.button(label).clicked() {
-                        toggle_pause = true;
-                    }
-                    if ui.button("⏮").clicked() {
-                        step = -1;
-                    }
-                });
-            });
 
-            ui.add_space(2.0);
-            let total = audio.total.map(|d| d.as_secs_f32()).unwrap_or(0.0);
-            let pos = audio.position().as_secs_f32();
-            let mut new_pos = pos;
-            let width = ui.available_width();
-            let slider = ui.add_sized(
-                egui::vec2(width, 18.0),
-                egui::Slider::new(&mut new_pos, 0.0..=total.max(1.0)).show_value(false),
-            );
-            if slider.changed() {
-                seek_to = Some(new_pos);
-            }
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(ui::fmt_time(pos)).weak().small());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Centre: transport, centred in the middle of the bar.
+                    let centre_width = (ui.available_width() - 210.0).max(200.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(centre_width, row_height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            let spacing = ui.spacing().item_spacing.x;
+                            let buttons = 34.0 + 48.0 + 34.0 + spacing * 2.0;
+                            ui.add_space(((centre_width - buttons) / 2.0).max(0.0));
+                            if ui::round_button(ui, "⏮", 34.0, false).clicked() {
+                                step = -1;
+                            }
+                            let glyph = if paused { "▶" } else { "⏸" };
+                            if ui::round_button(ui, glyph, 48.0, true).clicked() {
+                                toggle_pause = true;
+                            }
+                            if ui::round_button(ui, "⏭", 34.0, false).clicked() {
+                                step = 1;
+                            }
+                        },
+                    );
+
+                    // Right: volume.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), row_height),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.add_sized(
+                                egui::vec2(96.0, 16.0),
+                                egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+                            );
+                            ui.add_space(2.0);
+                            ui.label(RichText::new("🔊").weak());
+                        },
+                    );
+                });
+
+                // Progress row.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(ui::fmt_time(pos)).weak().small());
+                    ui.add_space(10.0);
+                    let bar_width = (ui.available_width() - 70.0).max(80.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(bar_width, 16.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            if let Some(p) = ui::progress_bar(ui, pos, total) {
+                                seek_to = Some(p);
+                            }
+                        },
+                    );
+                    ui.add_space(10.0);
                     ui.label(RichText::new(ui::fmt_time(total)).weak().small());
                 });
+                ui.add_space(10.0);
             });
-            ui.add_space(6.0);
-        });
 
         self.volume = volume;
         if let Some(audio) = self.audio.as_mut() {
@@ -996,6 +1013,10 @@ impl eframe::App for App {
         let playing = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
         if self.busy || !self.downloading.is_empty() || playing {
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        // Keep pulling in artwork that is still on its way.
+        if !self.thumb_inflight.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(40));
         }
     }
 }
