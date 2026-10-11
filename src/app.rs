@@ -158,6 +158,41 @@ enum Repeat {
     One,
 }
 
+/// What should follow the current track when it ends.
+#[derive(Debug, PartialEq, Eq)]
+enum Advance {
+    /// Play this index in the queue.
+    Play(usize),
+    /// Nothing left to play.
+    Stop,
+}
+
+/// Decide what plays after the current track.
+///
+/// Kept apart from the UI loop so the rules are actually testable: repeat-one
+/// always wins, shuffle supplies its own index, and repeat-all wraps at the
+/// end of the queue. Getting this wrong is invisible until a queue ends.
+fn advance_decision(
+    repeat: Repeat,
+    shuffle_index: Option<usize>,
+    queue_len: usize,
+    current: Option<usize>,
+) -> Advance {
+    if repeat == Repeat::One
+        && let Some(current) = current
+    {
+        return Advance::Play(current);
+    }
+    if let Some(index) = shuffle_index {
+        return Advance::Play(index);
+    }
+    match current {
+        Some(index) if index + 1 < queue_len => Advance::Play(index + 1),
+        Some(_) if repeat == Repeat::All && queue_len > 0 => Advance::Play(0),
+        _ => Advance::Stop,
+    }
+}
+
 /// A pseudo-random queue index, without pulling in a dependency.
 fn random_index(len: usize, avoid: Option<usize>) -> usize {
     if len <= 1 {
@@ -1418,22 +1453,15 @@ impl App {
             return;
         }
         self.advance_armed = false;
-        if self.repeat == Repeat::One
-            && let Some(current) = self.current
-        {
-            self.play_index(ctx, current);
-            return;
-        }
-        if self.shuffle && !self.queue.is_empty() {
-            self.play_index(ctx, random_index(self.queue.len(), self.current));
-            return;
-        }
-        match self.current {
-            Some(current) if current + 1 < self.queue.len() => self.play_index(ctx, current + 1),
-            Some(_) if self.repeat == Repeat::All && !self.queue.is_empty() => {
-                self.play_index(ctx, 0)
-            }
-            _ => {
+
+        let shuffle_index = if self.shuffle && !self.queue.is_empty() {
+            Some(random_index(self.queue.len(), self.current))
+        } else {
+            None
+        };
+        match advance_decision(self.repeat, shuffle_index, self.queue.len(), self.current) {
+            Advance::Play(index) => self.play_index(ctx, index),
+            Advance::Stop => {
                 self.current = None;
                 if let Some(audio) = self.audio.as_mut() {
                     audio.stop();
@@ -1983,10 +2011,16 @@ impl App {
                 let has_track = audio.now_playing.is_some();
                 let row_height = 56.0;
 
+                // Equal side widths put the transport cluster in the middle of
+                // the *bar*, and reserving them exactly keeps it there when a
+                // title gets shorter or longer.
+                let side = (ui.available_width() * 0.28).clamp(220.0, 340.0);
+
                 ui.horizontal(|ui| {
                     // Left: artwork and titles.
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(320.0, row_height),
+                    ui::fixed_section(
+                        ui,
+                        egui::vec2(side, row_height),
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             if let Some(track) = &audio.now_playing {
@@ -1998,8 +2032,9 @@ impl App {
                                     6.0,
                                 );
                                 ui.add_space(10.0);
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(238.0, row_height),
+                                ui::fixed_section(
+                                    ui,
+                                    egui::vec2((side - 76.0).max(60.0), row_height),
                                     Layout::top_down(Align::Min),
                                     |ui| {
                                         ui.add_space(12.0);
@@ -2021,9 +2056,10 @@ impl App {
                         },
                     );
 
-                    // Centre: transport, centred in the middle of the bar.
-                    let centre_width = (ui.available_width() - 210.0).max(200.0);
-                    ui.allocate_ui_with_layout(
+                    // Centre: transport, centred because the sides are equal.
+                    let centre_width = (ui.available_width() - side).max(180.0);
+                    ui::fixed_section(
+                        ui,
                         egui::vec2(centre_width, row_height),
                         Layout::left_to_right(Align::Center),
                         |ui| {
@@ -2032,18 +2068,7 @@ impl App {
                             ui.add_space(((centre_width - buttons) / 2.0).max(0.0));
                             // Transport is inert until something is loaded.
                             ui.add_enabled_ui(has_track, |ui| {
-                                let shuffle_tint = if shuffle {
-                                    ui::ACCENT
-                                } else {
-                                    ui.visuals().weak_text_color()
-                                };
-                                if ui
-                                    .selectable_label(
-                                        false,
-                                        RichText::new("🔀").color(shuffle_tint),
-                                    )
-                                    .clicked()
-                                {
+                                if ui::transport_toggle(ui, "🔀", None, shuffle, 28.0).clicked() {
                                     shuffle = !shuffle;
                                 }
                                 if ui::round_button(ui, "⏮", 34.0, false).clicked() {
@@ -2056,21 +2081,18 @@ impl App {
                                 if ui::round_button(ui, "⏭", 34.0, false).clicked() {
                                     step = 1;
                                 }
-                                let repeat_glyph = match repeat {
-                                    Repeat::Off | Repeat::All => "🔁",
-                                    Repeat::One => "🔂",
-                                };
-                                let repeat_tint = if repeat == Repeat::Off {
-                                    ui.visuals().weak_text_color()
-                                } else {
-                                    ui::ACCENT
-                                };
-                                if ui
-                                    .selectable_label(
-                                        false,
-                                        RichText::new(repeat_glyph).color(repeat_tint),
-                                    )
-                                    .clicked()
+                                // Repeat-one gets a text badge: the "🔂" glyph
+                                // is missing from many fonts and renders blank,
+                                // so the state used to look like it did nothing.
+                                let badge = (repeat == Repeat::One).then_some("1");
+                                if ui::transport_toggle(
+                                    ui,
+                                    "🔁",
+                                    badge,
+                                    repeat != Repeat::Off,
+                                    28.0,
+                                )
+                                .clicked()
                                 {
                                     repeat = match repeat {
                                         Repeat::Off => Repeat::All,
@@ -2083,13 +2105,15 @@ impl App {
                     );
 
                     // Right: volume.
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), row_height),
+                    ui::fixed_section(
+                        ui,
+                        egui::vec2(side, row_height),
                         Layout::right_to_left(Align::Center),
                         |ui| {
                             // Right padding so the slider doesn't touch the edge.
                             ui.add_space(14.0);
-                            ui.allocate_ui_with_layout(
+                            ui::fixed_section(
+                                ui,
                                 egui::vec2(116.0, 16.0),
                                 Layout::left_to_right(Align::Center),
                                 |ui| {
@@ -2107,14 +2131,24 @@ impl App {
                     );
                 });
 
-                // Progress row.
+                // Progress row. The time labels get a fixed width too, or the
+                // bar slides around as "0:05" becomes "12:34".
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
+                    const TIME_W: f32 = 48.0;
                     ui.add_space(14.0);
-                    ui.label(RichText::new(ui::fmt_time(pos)).weak().small());
+                    ui::fixed_section(
+                        ui,
+                        egui::vec2(TIME_W, 16.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.label(RichText::new(ui::fmt_time(pos)).weak().small());
+                        },
+                    );
                     ui.add_space(10.0);
-                    let bar_width = (ui.available_width() - 78.0).max(80.0);
-                    ui.allocate_ui_with_layout(
+                    let bar_width = (ui.available_width() - TIME_W - 24.0).max(80.0);
+                    ui::fixed_section(
+                        ui,
                         egui::vec2(bar_width, 16.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
@@ -2124,8 +2158,14 @@ impl App {
                         },
                     );
                     ui.add_space(10.0);
-                    ui.label(RichText::new(ui::fmt_time(total)).weak().small());
-                    ui.add_space(14.0);
+                    ui::fixed_section(
+                        ui,
+                        egui::vec2(TIME_W, 16.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.label(RichText::new(ui::fmt_time(total)).weak().small());
+                        },
+                    );
                 });
                 ui.add_space(10.0);
             });
@@ -2224,4 +2264,68 @@ fn detail_header(ui: &mut egui::Ui, page: &Page, thumbs: &HashMap<String, egui::
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(4.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Repeat off walks the queue and then stops.
+    #[test]
+    fn repeat_off_advances_then_stops() {
+        assert_eq!(
+            advance_decision(Repeat::Off, None, 3, Some(0)),
+            Advance::Play(1)
+        );
+        assert_eq!(
+            advance_decision(Repeat::Off, None, 3, Some(2)),
+            Advance::Stop
+        );
+    }
+
+    /// Repeat all wraps from the last track back to the first.
+    #[test]
+    fn repeat_all_wraps() {
+        assert_eq!(
+            advance_decision(Repeat::All, None, 3, Some(2)),
+            Advance::Play(0)
+        );
+    }
+
+    /// Repeat one replays the same track rather than moving on — the whole
+    /// point of the mode, and the case that looked broken in the UI.
+    #[test]
+    fn repeat_one_replays_current() {
+        assert_eq!(
+            advance_decision(Repeat::One, None, 3, Some(1)),
+            Advance::Play(1)
+        );
+        // Including on the last track, where the other modes would stop/wrap.
+        assert_eq!(
+            advance_decision(Repeat::One, None, 3, Some(2)),
+            Advance::Play(2)
+        );
+    }
+
+    /// Shuffle supplies its own index instead of walking the queue.
+    #[test]
+    fn shuffle_uses_its_index() {
+        assert_eq!(
+            advance_decision(Repeat::Off, Some(2), 3, Some(0)),
+            Advance::Play(2)
+        );
+        // Repeat one still wins: it is a stronger statement than shuffle.
+        assert_eq!(
+            advance_decision(Repeat::One, Some(2), 3, Some(0)),
+            Advance::Play(0)
+        );
+    }
+
+    /// Nothing playing, or an empty queue, must not index out of bounds.
+    #[test]
+    fn stops_without_a_queue() {
+        assert_eq!(advance_decision(Repeat::All, None, 0, None), Advance::Stop);
+        assert_eq!(advance_decision(Repeat::One, None, 0, None), Advance::Stop);
+        assert_eq!(advance_decision(Repeat::One, None, 3, None), Advance::Stop);
+    }
 }

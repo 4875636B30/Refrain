@@ -7,7 +7,9 @@ use egui::{Align, Color32, Layout, RichText};
 use crate::ytm::SearchItem;
 
 /// Accent used for selections and highlights.
-pub const ACCENT: Color32 = Color32::from_rgb(0x1d, 0xb9, 0x54);
+/// YouTube's red. This is a YouTube Music client, so the accent is the brand
+/// red — it used to be Spotify green, which read as a Spotify clone.
+pub const ACCENT: Color32 = Color32::from_rgb(0xff, 0x00, 0x00);
 
 /// Used for warnings (missing tools, failed actions).
 pub const WARN: Color32 = Color32::from_rgb(0xe6, 0xb4, 0x64);
@@ -90,13 +92,15 @@ pub fn round_button(
     let visuals = ui.visuals();
 
     let (fill, color) = if primary {
+        // YouTube Music's play button is a light disc with an inverted glyph,
+        // not an accent-coloured one.
         (
             if hovered {
-                ACCENT.gamma_multiply(1.25)
+                visuals.widgets.hovered.fg_stroke.color
             } else {
-                ACCENT
+                visuals.text_color()
             },
-            Color32::WHITE,
+            visuals.panel_fill,
         )
     } else if hovered {
         (visuals.widgets.hovered.bg_fill, visuals.text_color())
@@ -122,6 +126,68 @@ pub fn round_button(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response
+}
+
+/// A transport toggle (shuffle, repeat) with a fixed footprint.
+///
+/// The size is reserved up front so the neighbouring buttons can never move,
+/// and the `badge` is drawn as plain text because repeat-one needs a state
+/// marker and the `🔂` emoji is absent from many fonts — it renders as blank,
+/// which makes the button look like it did nothing.
+pub fn transport_toggle(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    badge: Option<&str>,
+    active: bool,
+    size: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let visuals = ui.visuals();
+    let tint = if active {
+        ACCENT
+    } else {
+        visuals.weak_text_color()
+    };
+
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 6.0, visuals.widgets.hovered.bg_fill);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(size * 0.62),
+        tint,
+    );
+    if let Some(badge) = badge {
+        ui.painter().text(
+            egui::pos2(rect.right(), rect.top()),
+            egui::Align2::RIGHT_TOP,
+            badge,
+            egui::FontId::proportional(size * 0.46),
+            tint,
+        );
+    }
+    response
+}
+
+/// Lay `contents` out inside a region of exactly `size`.
+///
+/// `allocate_ui_with_layout` shrinks to fit its content, so a section holding a
+/// short title comes out narrower than the same section holding a long one —
+/// which drags everything after it around the bar. Reserving the space up front
+/// keeps the layout still, which matters most for the transport controls.
+pub fn fixed_section(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    layout: egui::Layout,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+    contents(&mut child);
 }
 
 /// A slim draggable progress bar. Returns a new position when the user seeks.
