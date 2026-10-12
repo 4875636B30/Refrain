@@ -47,8 +47,20 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      # The output is captured to a file as well as the log: job logs need
+      # admin rights to fetch, artifacts do not.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee "clippy-${{ runner.os }}.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload clippy output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-${{ runner.os }}
+          path: clippy-*.log
 
       - name: Test
         run: cargo test --all
