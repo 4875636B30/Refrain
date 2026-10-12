@@ -110,6 +110,64 @@ which playlist ids are normalised, how a yt-dlp failure is explained. If you add
 a rule like that, put it in a function and test it — several bugs here were only
 findable once the rule was extracted from the UI loop.
 
+## Help wanted
+
+Concrete and bounded, roughly by size. None of these need a plan agreed first —
+open an issue saying which one you are taking.
+
+**Good first issues**
+
+- **A cookies-file path field in Settings.** The `file` auth mode works but is
+  config-only: `AuthConfig::cookies_file` has no UI. One text field, saved like
+  the other sign-in choices. Useful for anyone whose browser is somewhere the
+  client cannot reach — a Flatpak, or a browser it does not know.
+- **A like shortcut.** Thumbs already work; there is no key for them. One
+  binding in `handle_shortcuts`, next to the existing ones.
+- **`--canary` on macOS and Windows in CI.** It runs in the release workflow
+  already, so the live API and yt-dlp are checked when a tag is pushed — but not
+  on every push. Wiring it into the CI matrix (macOS, Windows) is a few lines,
+  and it is the closest a runner gets to "does it work there".
+
+**Medium**
+
+- **Parser fixture tests.** `ytm/extract.rs` is the most fragile part of the
+  project by design — it walks YouTube's response tree by renderer name and
+  skips what it does not recognise, which is what keeps it working when the
+  layout changes. Captured payloads turned into tests would catch *our*
+  regressions; the canary catches YouTube's.
+- **An offline view.** `--download` caches a track, and the cache is budgeted and
+  pruned, but nothing in the UI lists what is cached or offers to keep it. A
+  "Downloads" list in the sidebar would make the offline story real.
+- **Lyrics.** Not implemented at all. The `next` endpoint carries them for much
+  of the catalogue.
+
+**Larger, or needs care**
+
+- **Flatpak sign-in.** See `packaging/flathub/README.md`: Chromium-family
+  browsers need the `secretstorage` Python module inside the sandbox, and there
+  is a choice to make between bundling it and steering users to a `cookies.txt`.
+- **MPRIS `LoopStatus` and `Shuffle`.** souvlaki does not implement those
+  optional properties, so repeat and shuffle are app-only. Either upstream, or a
+  small zbus interface of our own alongside it.
+- **Packaging beyond the AppImage and the AUR**: a `.deb`, a Nix flake, or an
+  AppImage that updates itself.
+
+## Recording a demo
+
+`--demo` runs a scripted sequence — search, open an album, play it, show the
+queue — so a screenshot or a GIF can be reproduced on demand. It is also the
+reason the screenshot in the README shows an album page rather than a home feed:
+a home feed is personalised, and publishing one publishes the author's taste.
+
+```sh
+cargo run --release -- --demo
+```
+
+It plays audio, so mute first if that matters. For a still, capture once the
+queue has appeared (about ten seconds in, depending on how long sign-in takes —
+the steps wait for each other rather than running on a timer, so it is safe to
+start recording whenever).
+
 ## Scope
 
 The project aims to be a good *client*: fast to start, light on memory, and

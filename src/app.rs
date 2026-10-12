@@ -321,6 +321,57 @@ fn playlists_from(page: &Page) -> Vec<(String, String)> {
         .collect()
 }
 
+/// What the scripted demo searches for. A well-known artist, so the results are
+/// the same for everyone — the point of the demo is that it shows *nobody's*
+/// library.
+const DEMO_QUERY: &str = "daft punk";
+
+/// One step of the scripted demo.
+#[derive(Clone, Copy)]
+enum DemoStep {
+    Search,
+    OpenAlbum,
+    Play,
+    ShowQueue,
+}
+
+/// A scripted run, for screenshots and recordings.
+///
+/// It exists so a demo can be reproduced on demand, and so the screenshot in the
+/// README does not have to be someone's home feed — which is personalised, and
+/// therefore publishes their taste. Everything it shows is a search for a
+/// well-known artist: real data, nobody's history.
+struct Demo {
+    step: usize,
+    /// When the current step began waiting, for the timeout above.
+    step_started: Instant,
+}
+
+impl Demo {
+    fn new() -> Self {
+        Self {
+            step: 0,
+            step_started: Instant::now(),
+        }
+    }
+
+    /// The steps, in order.
+    const STEPS: [DemoStep; 4] = [
+        DemoStep::Search,
+        DemoStep::OpenAlbum,
+        DemoStep::Play,
+        DemoStep::ShowQueue,
+    ];
+
+    /// A step is skipped if its condition never arrives, so the demo cannot
+    /// stall on a search that came back without an album.
+    const STEP_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// The shortest gap between steps, so they are visible rather than
+    /// instantaneous — this is a recording, after all.
+    const STEP_GAP: Duration = Duration::from_millis(1200);
+}
+
 /// The "add to playlist" dialog.
 struct Picker {
     video_id: String,
@@ -565,6 +616,10 @@ pub struct App {
     last_prune: Instant,
     /// Whether the "Up next" queue panel is showing.
     show_queue: bool,
+    /// Whether the sign-in attempt has finished, successfully or not. The demo
+    /// waits for this: signing in re-runs the last search, which would otherwise
+    /// yank the view back while the script is navigating.
+    auth_settled: bool,
     /// The sign-in *preference* from the config, as opposed to `auth`, which is
     /// the source that actually resolved. Editing the resolved one would
     /// silently turn "detect automatically" into a pinned browser.
@@ -580,6 +635,8 @@ pub struct App {
     search_items: Vec<SearchItem>,
     search_more: Option<String>,
     want_more_results: bool,
+    /// The scripted demo, when one is running (see `Demo`).
+    demo: Option<Demo>,
     /// Whether the settings window is showing, and what the cache holds.
     show_settings: bool,
     cache_usage: (usize, u64),
@@ -725,6 +782,7 @@ impl App {
             rx,
             ytdlp,
             auth,
+            auth_settled: false,
             auth_pref,
             authenticated: false,
             deferred_play: None,
@@ -755,6 +813,7 @@ impl App {
             search_items: Vec::new(),
             search_more: None,
             want_more_results: false,
+            demo: std::env::args().any(|arg| arg == "--demo").then(Demo::new),
             show_settings: false,
             cache_usage: (0, 0),
             ytdlp_version: None,
@@ -794,7 +853,11 @@ impl App {
             thumb_failed: HashSet::new(),
         };
         // Open on the home feed rather than a blank search page.
-        app.load_page(&cc.egui_ctx, "FEmusic_home".to_string(), false);
+        // The demo script navigates for itself; loading Home first would only
+        // flash a personalised feed on screen.
+        if app.demo.is_none() {
+            app.load_page(&cc.egui_ctx, "FEmusic_home".to_string(), false);
+        }
         Ok(app)
     }
 
@@ -1627,6 +1690,7 @@ impl App {
                     }
                 }
                 Msg::Auth(result) => {
+                    self.auth_settled = true;
                     match &result {
                         Ok(Some(resolved)) => eprintln!(
                             "[auth] chose browser={:?} session={}",
@@ -3178,6 +3242,83 @@ impl App {
         }
     }
 
+    /// Advance the demo script: each step fires once its condition holds.
+    ///
+    /// Conditions rather than a schedule, because authentication, a search and a
+    /// page load all take a variable amount of time. A timer races them — the
+    /// first attempt fired its "open an album" step before the search had
+    /// returned, and the demo never left the search view.
+    fn tick_demo(&mut self, ctx: &egui::Context) {
+        let Some(demo) = self.demo.as_ref() else {
+            return;
+        };
+        let Some(step) = Demo::STEPS.get(demo.step).copied() else {
+            return;
+        };
+        let waited = demo.step_started.elapsed();
+        if waited < Demo::STEP_GAP {
+            return;
+        }
+        let ready = self.demo_step_ready(step);
+        if !ready && waited < Demo::STEP_TIMEOUT {
+            return;
+        }
+        if let Some(demo) = self.demo.as_mut() {
+            demo.step += 1;
+            demo.step_started = Instant::now();
+        }
+        if ready {
+            self.run_demo_step(ctx, step);
+        }
+    }
+
+    /// What has to be true before a step is worth running.
+    fn demo_step_ready(&self, step: DemoStep) -> bool {
+        match step {
+            // Signing in re-runs the last search, so search after it settles or
+            // the view is yanked back mid-script.
+            DemoStep::Search => self.auth_settled,
+            DemoStep::OpenAlbum => self
+                .sections
+                .iter()
+                .any(|section| section.filter == SearchFilter::Albums && !section.items.is_empty()),
+            DemoStep::Play => matches!(&self.view, View::Detail(page) if !page.tracks.is_empty()),
+            DemoStep::ShowQueue => self
+                .audio
+                .as_ref()
+                .is_some_and(|audio| audio.now_playing.is_some()),
+        }
+    }
+
+    fn run_demo_step(&mut self, ctx: &egui::Context, step: DemoStep) {
+        match step {
+            DemoStep::Search => {
+                self.query = DEMO_QUERY.to_string();
+                self.filter = SearchFilter::All;
+                self.run_search(ctx);
+            }
+            DemoStep::OpenAlbum => {
+                // Found by searching rather than hard-coded, so the demo does
+                // not rot when an id changes.
+                let album = self
+                    .sections
+                    .iter()
+                    .find(|section| section.filter == SearchFilter::Albums)
+                    .and_then(|section| section.items.first())
+                    .and_then(|item| item.browse_id.clone());
+                if let Some(album) = album {
+                    self.load_page(ctx, album, true);
+                }
+            }
+            DemoStep::Play => {
+                if matches!(&self.view, View::Detail(page) if !page.tracks.is_empty()) {
+                    self.play_index(ctx, 0);
+                }
+            }
+            DemoStep::ShowQueue => self.show_queue = true,
+        }
+    }
+
     /// Keep the displayed rating in step with the track that is playing.
     fn tick_like_status(&mut self, ctx: &egui::Context) {
         if !self.authenticated || self.like_inflight {
@@ -3572,6 +3713,7 @@ impl eframe::App for App {
         self.tick_deferred_play(&ctx);
         self.tick_like_status(&ctx);
         self.tick_media();
+        self.tick_demo(&ctx);
         self.playlist_picker(&ctx);
         self.playlist_dialogs(&ctx);
         self.settings_window(&ctx);

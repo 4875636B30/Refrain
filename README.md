@@ -221,6 +221,7 @@ cargo test
 Useful diagnostics, all of which run without a GUI:
 
 ```sh
+cargo run -- --demo                   # scripted run, for screenshots and GIFs
 cargo run -- --canary                 # check the live API and yt-dlp still work
 cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --probe "daft punk"      # exercise search + browse

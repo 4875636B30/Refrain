@@ -167,6 +167,21 @@ reader that sees EOF first will surface rodio's message instead. `StreamFailure`
 exists so a caller can ask afterwards why it failed, once the decoder has taken
 ownership of the source.
 
+## The demo mode
+
+`--demo` drives the app through a fixed sequence: search for a well-known
+artist, open the first album it finds, play it, open the queue. It exists for
+two reasons — a screenshot or GIF can be reproduced on demand rather than
+hand-assembled, and the screenshot in the README does not have to be anyone's
+home feed, which is personalised and therefore publishes their taste.
+
+Two details it learned the hard way. The steps are gated on **conditions**, not
+a timer: authentication, a search and a page load all take a variable amount of
+time, and the first version fired "open an album" before the search had
+returned, so the demo never left the search view. And the first step waits for
+sign-in to *settle* — signing in re-runs the last search, which yanks the view
+back if the script has already navigated away.
+
 ## Memory
 
 Measured on a release build with the home feed loaded: **~205 MB resident**,
@@ -429,6 +444,7 @@ Everything below runs without a GUI, which is what makes them useful on a
 machine with no display:
 
 ```sh
+cargo run -- --demo                   # scripted run, for screenshots and GIFs
 cargo run -- --canary                 # check the live API and yt-dlp still work
 cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --probe "daft punk"      # exercise search + browse
