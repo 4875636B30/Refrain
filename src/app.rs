@@ -2176,27 +2176,27 @@ impl App {
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                // A single interactive height keeps every control level.
-                ui.spacing_mut().interact_size.y = 30.0;
-                // Three fixed regions so the centre really is centred and both
-                // edges get the same padding.
+                // Every control shares one height, so they line up.
+                ui.spacing_mut().interact_size.y = ui::CONTROL_HEIGHT;
+                // Equal side widths, so the middle cluster really is centred.
                 let total = ui.available_width();
-                let left_width = 104.0;
-                let right_width = 92.0;
-                let centre_width = (total - left_width - right_width).max(240.0);
+                let side = 84.0;
+                let centre_width = (total - side * 2.0).max(260.0);
 
                 ui.allocate_ui_with_layout(
-                    egui::vec2(left_width, 30.0),
+                    egui::vec2(side, ui::CONTROL_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        // The panel frame already provides the same 8px margin
-                        // the content below uses, so don't add more.
-                        if ui
-                            .add_enabled(
-                                !matches!(self.view, View::Search) || self.prev_sections.is_some(),
-                                egui::Button::new("⏴  Back"),
-                            )
-                            .clicked()
+                        let can_go_back =
+                            !matches!(self.view, View::Search) || self.prev_sections.is_some();
+                        if ui::icon_button(
+                            ui,
+                            ui::Icon::ChevronLeft,
+                            ui::CONTROL_HEIGHT,
+                            can_go_back,
+                            "Back",
+                        )
+                        .clicked()
                         {
                             go_back = true;
                         }
@@ -2204,75 +2204,99 @@ impl App {
                 );
 
                 ui.allocate_ui_with_layout(
-                    egui::vec2(centre_width, 30.0),
+                    egui::vec2(centre_width, ui::CONTROL_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        let cluster = 360.0 + 46.0 + 140.0 + 92.0 + 30.0;
+                        const SEARCH_WIDTH: f32 = 340.0;
+                        // The chip fits its label — so the chevron sits against
+                        // it — but the slot it sits in is fixed, or the centred
+                        // cluster would shift sideways when the filter changes.
+                        const FILTER_SLOT: f32 = 112.0;
+                        let cluster = SEARCH_WIDTH + 12.0 + FILTER_SLOT + 12.0 + 88.0;
                         ui.add_space(((centre_width - cluster) / 2.0).max(0.0));
-                        if ui::search_bar(ui, &mut self.query, 360.0) {
+                        if ui::search_bar(ui, &mut self.query, SEARCH_WIDTH) {
                             do_search = true;
                         }
-                        ui.add_space(6.0);
-                        let mut chosen = self.filter;
-                        egui::ComboBox::from_id_salt("search_filter")
-                            .width(132.0)
-                            .selected_text(self.filter.label())
-                            .show_ui(ui, |ui| {
-                                for option in SearchFilter::ALL_FILTERS {
-                                    ui.selectable_value(&mut chosen, option, option.label());
-                                }
-                            });
-                        if chosen != self.filter {
+                        ui.add_space(12.0);
+                        let mut chosen = None;
+                        ui::fixed_section(
+                            ui,
+                            egui::vec2(FILTER_SLOT, ui::CONTROL_HEIGHT),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                chosen = ui::pill_dropdown(
+                                    ui,
+                                    "search_filter",
+                                    self.filter,
+                                    &SearchFilter::ALL_FILTERS,
+                                    |filter| filter.label(),
+                                );
+                            },
+                        );
+                        if let Some(chosen) = chosen {
                             self.filter = chosen;
                             filter_changed = true;
                         }
-                        if ui.button("Search").clicked() {
+                        ui.add_space(12.0);
+                        if ui::pill_button(ui, "Search").clicked() {
                             do_search = true;
                         }
                     },
                 );
 
                 ui.allocate_ui_with_layout(
-                    egui::vec2(right_width, 30.0),
+                    egui::vec2(side, ui::CONTROL_HEIGHT),
                     Layout::right_to_left(Align::Center),
                     |ui| {
-                        // Same margin as the rest of the panel; no extra inset.
-                        // In a right-to-left layout the first widget is the
-                        // rightmost, so the gear is placed first and the spinner
-                        // sits to its left with a gap between them.
-                        ui.menu_button("⚙", |ui| {
-                            let theme_label = if self.theme_light {
-                                "☾  Dark theme"
-                            } else {
-                                "☀  Light theme"
-                            };
-                            if ui.button(theme_label).clicked() {
-                                self.theme_light = !self.theme_light;
-                                self.theme_applied = false;
-                                self.save_ui_settings();
-                                ui.close();
-                            }
-                            if ui.button("⚙  Settings…").clicked() {
-                                // Measure the cache as it opens, not every frame.
-                                self.cache_usage = resolver::cache_usage();
-                                self.spawn_ytdlp_version(ctx);
-                                self.show_settings = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.label(
-                                RichText::new(if self.authenticated {
-                                    "signed in"
-                                } else {
-                                    "anonymous"
-                                })
-                                .small()
-                                .weak(),
-                            );
-                        });
+                        // The spinner sits left of the gear, which is rightmost.
                         if self.busy {
-                            ui.add_space(6.0);
                             ui.spinner();
+                            ui.add_space(8.0);
+                        }
+                        let gear = ui::icon_button(
+                            ui,
+                            ui::Icon::Glyph("⚙"),
+                            ui::CONTROL_HEIGHT,
+                            true,
+                            "Settings and theme",
+                        );
+                        let theme_label = if self.theme_light {
+                            "☾  Dark theme"
+                        } else {
+                            "☀  Light theme"
+                        };
+                        let mut open_settings = false;
+                        let mut toggle_theme = false;
+                        egui::Popup::menu(&gear)
+                            .id(egui::Id::new("app_menu"))
+                            .show(|ui| {
+                                if ui.button(theme_label).clicked() {
+                                    toggle_theme = true;
+                                }
+                                if ui.button("⚙  Settings…").clicked() {
+                                    open_settings = true;
+                                }
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(if self.authenticated {
+                                        "signed in"
+                                    } else {
+                                        "anonymous"
+                                    })
+                                    .small()
+                                    .weak(),
+                                );
+                            });
+                        if toggle_theme {
+                            self.theme_light = !self.theme_light;
+                            self.theme_applied = false;
+                            self.save_ui_settings();
+                        }
+                        if open_settings {
+                            // Measure the cache as it opens, not every frame.
+                            self.cache_usage = resolver::cache_usage();
+                            self.spawn_ytdlp_version(ctx);
+                            self.show_settings = true;
                         }
                     },
                 );

@@ -257,6 +257,267 @@ pub fn queue_icon(ui: &mut egui::Ui, active: bool, size: f32) -> egui::Response 
     response
 }
 
+/// The height every control in the top bar shares, so they line up.
+pub const CONTROL_HEIGHT: f32 = 34.0;
+
+/// An icon drawn with the painter rather than a font glyph.
+///
+/// Glyphs turned out to be a liability here: `▾` exists only in the monospace
+/// face, and a glyph missing from every font in the fallback chain renders as
+/// nothing at all. These shapes are simple enough to draw, and drawing them
+/// keeps the stroke weight consistent between the chevrons and the magnifier.
+#[derive(Clone, Copy)]
+pub enum Icon {
+    ChevronLeft,
+    ChevronDown,
+    Close,
+    Search,
+    /// For anything not worth drawing, like the gear.
+    Glyph(&'static str),
+}
+
+fn draw_icon(ui: &egui::Ui, icon: Icon, rect: egui::Rect, color: Color32) {
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(1.7, color);
+    let centre = rect.center();
+
+    match icon {
+        Icon::ChevronLeft => {
+            let reach = rect.height() * 0.20;
+            let tip = egui::pos2(centre.x - reach * 0.5, centre.y);
+            painter.line_segment(
+                [egui::pos2(centre.x + reach * 0.6, centre.y - reach), tip],
+                stroke,
+            );
+            painter.line_segment(
+                [tip, egui::pos2(centre.x + reach * 0.6, centre.y + reach)],
+                stroke,
+            );
+        }
+        Icon::ChevronDown => {
+            let reach = rect.height() * 0.19;
+            let tip = egui::pos2(centre.x, centre.y + reach * 0.55);
+            painter.line_segment(
+                [egui::pos2(centre.x - reach, centre.y - reach * 0.45), tip],
+                stroke,
+            );
+            painter.line_segment(
+                [tip, egui::pos2(centre.x + reach, centre.y - reach * 0.45)],
+                stroke,
+            );
+        }
+        Icon::Close => {
+            let reach = rect.height() * 0.17;
+            painter.line_segment(
+                [
+                    centre + egui::vec2(-reach, -reach),
+                    centre + egui::vec2(reach, reach),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    centre + egui::vec2(reach, -reach),
+                    centre + egui::vec2(-reach, reach),
+                ],
+                stroke,
+            );
+        }
+        Icon::Search => {
+            let radius = rect.height() * 0.21;
+            let centre = centre - egui::vec2(radius * 0.3, radius * 0.3);
+            painter.circle_stroke(centre, radius, stroke);
+            let handle = radius * 0.72;
+            painter.line_segment(
+                [
+                    centre + egui::vec2(handle, handle),
+                    centre + egui::vec2(handle * 2.1, handle * 2.1),
+                ],
+                stroke,
+            );
+        }
+        Icon::Glyph(glyph) => {
+            painter.text(
+                centre,
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(rect.height() * 0.56),
+                color,
+            );
+        }
+    }
+}
+
+/// A circular icon button — the shape YouTube Music uses for toolbar icons.
+pub fn icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    enabled: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), sense);
+    let visuals = ui.visuals();
+    let hovered = enabled && response.hovered();
+
+    if hovered {
+        ui.painter()
+            .circle_filled(rect.center(), size / 2.0, visuals.widgets.hovered.bg_fill);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    // Resting icons are already the strongest text colour: the hover feedback
+    // is the circle behind them, so dimming them at rest would only make them
+    // look disabled.
+    let color = if !enabled {
+        visuals.weak_text_color().gamma_multiply(0.45)
+    } else {
+        visuals.strong_text_color()
+    };
+    draw_icon(ui, icon, rect, color);
+
+    if enabled {
+        response.on_hover_text(tooltip)
+    } else {
+        response
+    }
+}
+
+/// Run `contents` with the theme's widget visuals overridden.
+///
+/// The standard widgets already get interaction states right; this is how they
+/// are given the pill shapes and fills this design uses, instead of
+/// reimplementing buttons and their hover handling.
+pub fn with_visuals<R>(
+    ui: &mut egui::Ui,
+    style: impl FnOnce(&mut egui::Visuals),
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let saved = ui.visuals().clone();
+    style(ui.visuals_mut());
+    let result = contents(ui);
+    *ui.visuals_mut() = saved;
+    result
+}
+
+/// Give the widgets in a scope a flat pill look.
+fn pill(visuals: &mut egui::Visuals, fill: Color32, hover: Color32, fg: Color32, radius: u8) {
+    for state in [
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        state.corner_radius = egui::CornerRadius::same(radius);
+        state.bg_stroke = egui::Stroke::NONE;
+        state.fg_stroke = egui::Stroke::new(1.0, fg);
+    }
+    visuals.widgets.inactive.bg_fill = fill;
+    visuals.widgets.inactive.weak_bg_fill = fill;
+    visuals.widgets.hovered.bg_fill = hover;
+    visuals.widgets.hovered.weak_bg_fill = hover;
+    visuals.widgets.active.bg_fill = hover;
+    visuals.widgets.active.weak_bg_fill = hover;
+    visuals.widgets.open.bg_fill = hover;
+    visuals.widgets.open.weak_bg_fill = hover;
+}
+
+/// The fill of a quiet pill (the filter, the search field).
+fn chip_fill(visuals: &egui::Visuals) -> Color32 {
+    visuals.widgets.inactive.weak_bg_fill
+}
+
+/// A pill-shaped dropdown: the current choice, a drawn chevron, and a menu.
+///
+/// Hand-rolled rather than a styled `ComboBox` because the chevron has to sit
+/// against the label: a combo box reserves a fixed width and pins its arrow to
+/// the far edge, which is what made the old one look disconnected.
+pub fn pill_dropdown<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: &str,
+    selected: T,
+    options: &[T],
+    label: impl Fn(T) -> &'static str,
+) -> Option<T> {
+    let visuals = ui.visuals().clone();
+    let text = label(selected);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(14.0),
+        visuals.text_color(),
+    );
+    let width = galley.size().x + 40.0;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, CONTROL_HEIGHT), egui::Sense::click());
+
+    let hovered = response.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if hovered {
+        visuals.widgets.hovered.bg_fill
+    } else {
+        chip_fill(&visuals)
+    };
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same((CONTROL_HEIGHT / 2.0) as u8),
+        fill,
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        visuals.text_color(),
+    );
+    draw_icon(
+        ui,
+        Icon::ChevronDown,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 14.0, rect.center().y),
+            egui::vec2(14.0, 14.0),
+        ),
+        visuals.weak_text_color(),
+    );
+
+    let mut chosen = None;
+    egui::Popup::menu(&response)
+        .id(egui::Id::new(id))
+        .show(|ui| {
+            ui.set_min_width(rect.width());
+            for option in options {
+                if ui
+                    .selectable_label(*option == selected, label(*option))
+                    .clicked()
+                {
+                    chosen = Some(*option);
+                }
+            }
+        });
+    chosen
+}
+
+/// A pill-shaped action button, in the accent colour.
+pub fn pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let radius = (CONTROL_HEIGHT / 2.0) as u8;
+    with_visuals(
+        ui,
+        |visuals| {
+            pill(
+                visuals,
+                ACCENT,
+                ACCENT.gamma_multiply(1.25),
+                Color32::WHITE,
+                radius,
+            )
+        },
+        |ui| ui.button(RichText::new(label).color(Color32::WHITE)),
+    )
+}
+
 /// Lay `contents` out inside a region of exactly `size`.
 ///
 /// `allocate_ui_with_layout` shrinks to fit its content, so a section holding a
@@ -578,37 +839,71 @@ pub const SEARCH_ID: &str = "refrain_search_field";
 
 /// A rounded search pill. Returns `true` when the user submits (Enter).
 pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
-    let mut submitted = false;
-    let visuals = ui.visuals();
-    let frame = egui::Frame::new()
-        .fill(visuals.extreme_bg_color)
-        .stroke(egui::Stroke::new(
-            1.0,
-            visuals.widgets.inactive.bg_stroke.color,
-        ))
-        .corner_radius(egui::CornerRadius::same(15))
-        .inner_margin(egui::Margin::symmetric(12, 3));
+    let focused = ui.memory(|memory| memory.has_focus(egui::Id::new(SEARCH_ID)));
+    let visuals = ui.visuals().clone();
+    let radius = egui::CornerRadius::same((CONTROL_HEIGHT / 2.0) as u8);
 
-    frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            // Don't inherit the toolbar's minimum control height, otherwise the
-            // pill ends up taller than the buttons beside it and nothing lines
-            // up vertically.
-            ui.spacing_mut().interact_size.y = 0.0;
-            ui.label(RichText::new("🔍").weak());
+    // The pill is drawn here rather than by a Frame so its height is exact and
+    // it can show focus without the text jumping.
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, CONTROL_HEIGHT), egui::Sense::hover());
+    let fill = if focused {
+        visuals.extreme_bg_color
+    } else {
+        chip_fill(&visuals)
+    };
+    ui.painter().rect_filled(rect, radius, fill);
+    if focused {
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.0, ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let mut submitted = false;
+    let mut clear = false;
+    let inner = rect.shrink2(egui::vec2(13.0, 0.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            draw_icon(
+                ui,
+                Icon::Search,
+                egui::Rect::from_center_size(
+                    egui::pos2(inner.left() + 8.0, inner.center().y),
+                    egui::vec2(17.0, 17.0),
+                ),
+                visuals.weak_text_color(),
+            );
+            ui.add_space(25.0);
+
+            // Room is reserved for the clear button whether or not it is drawn,
+            // so the text does not shift as you type.
+            let text_width = (inner.width() - 25.0 - 24.0).max(40.0);
             let edit = ui.add(
                 egui::TextEdit::singleline(query)
-                    // Transparent so the pill provides the background.
-                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 3)))
+                    .frame(egui::Frame::NONE)
                     .id(egui::Id::new(SEARCH_ID))
                     .hint_text("Search songs, albums, artists…")
-                    .desired_width(width),
+                    .desired_width(text_width),
             );
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submitted = true;
             }
-        });
-    });
+            ui.add_space(2.0);
+            if !query.is_empty() && icon_button(ui, Icon::Close, 22.0, true, "Clear").clicked() {
+                clear = true;
+            }
+        },
+    );
+
+    if clear {
+        query.clear();
+        ui.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH_ID)));
+    }
     submitted
 }
 
