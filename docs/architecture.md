@@ -159,6 +159,22 @@ subsequent launches.
 When several browsers are present, `auto` picks the first one that actually has a
 **YouTube session**, so a logged-out Firefox won't shadow a signed-in Brave.
 
+## Typography
+
+Roboto is bundled (`assets/fonts/`, Apache-2.0) rather than taken from the
+system, so the app looks the same on every desktop — the default egui stack is
+whatever the distribution happened to install.
+
+Two faces are shipped because YouTube Music uses both: Roboto Regular for body
+text and Roboto Medium for headings. egui has no concept of font weight, so the
+heavier face is registered as its own family (`roboto-medium`) and headings ask
+for it explicitly through `ui::title`.
+
+Roboto goes *first* in the proportional family and egui's own stack stays behind
+it. That stack carries the emoji and the transport glyphs the UI draws — and, as
+a lesson from a bug where the repeat button looked dead, a glyph that is missing
+from every font in the chain renders as nothing at all.
+
 ## Artwork
 
 Thumbnails are fetched with `reqwest` (the same stack the API client uses) and

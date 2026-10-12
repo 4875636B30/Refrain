@@ -2323,21 +2323,22 @@ impl App {
         }
 
         // Browsable carousels (artist albums, related, the home feed…).
-        for shelf in &page.shelves {
+        for (shelf_index, shelf) in page.shelves.iter().enumerate() {
             if shelf.items.is_empty() {
                 continue;
             }
             ui.add_space(18.0);
             if !shelf.title.is_empty() {
-                ui.label(RichText::new(&shelf.title).size(18.0).strong());
+                ui.label(ui::title(&shelf.title).size(18.0));
                 ui.add_space(6.0);
             }
-            if let Some(idx) = ui::cover_grid(
+            if let Some(idx) = ui::cover_row(
                 ui,
                 &self.thumbnails,
                 &shelf.items,
                 168.0,
                 current_video.as_deref(),
+                (page.browse_id.as_str(), shelf_index),
             ) {
                 *action = activate(&shelf.items, idx);
             }
@@ -2559,7 +2560,7 @@ impl App {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.label(RichText::new("Up next").size(17.0).strong());
+            ui.label(ui::title("Up next").size(17.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(14.0);
                 ui.label(
@@ -2886,6 +2887,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         if !self.theme_applied {
+            ui::install_fonts(&ctx);
             ui::apply_theme(&ctx, self.theme_light);
             self.theme_applied = true;
         }
@@ -2937,7 +2939,7 @@ fn detail_header(ui: &mut egui::Ui, page: &Page, thumbs: &HashMap<String, egui::
             if !kind.is_empty() {
                 ui.label(RichText::new(kind.to_uppercase()).weak().small());
             }
-            ui.label(RichText::new(&page.title).size(26.0).strong());
+            ui.label(ui::title(&page.title).size(26.0));
             if !page.subtitle.is_empty() {
                 ui.label(RichText::new(&page.subtitle).weak());
             }

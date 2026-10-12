@@ -84,6 +84,56 @@ pub fn apply_theme(ctx: &egui::Context, light: bool) {
     });
 }
 
+/// YouTube Music's headings are Roboto Medium. egui has no notion of font
+/// weight, so the heavier face is registered as its own family and picked
+/// explicitly via [`title`].
+pub const TITLE_FAMILY: &str = "roboto-medium";
+
+/// Install the bundled typeface.
+///
+/// Roboto is what YouTube Music uses, and bundling it rather than relying on
+/// the system keeps the app looking the same everywhere — the default egui
+/// stack is whatever the desktop happens to provide.
+///
+/// Roboto goes *first* and egui's own stack stays behind it: that stack carries
+/// the emoji and the transport glyphs the UI draws, and covers scripts this
+/// file may not.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "roboto".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/Roboto-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        TITLE_FAMILY.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/Roboto-Medium.ttf"
+        ))),
+    );
+
+    let proportional = fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default();
+    proportional.insert(0, "roboto".to_owned());
+
+    let mut heading = vec![TITLE_FAMILY.to_owned()];
+    heading.extend(proportional.iter().cloned());
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(TITLE_FAMILY.into()), heading);
+
+    ctx.set_fonts(fonts);
+}
+
+/// A heading in Roboto Medium.
+pub fn title(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).family(egui::FontFamily::Name(TITLE_FAMILY.into()))
+}
+
 /// A circular transport button; `primary` gets the accent fill.
 pub fn round_button(
     ui: &mut egui::Ui,
@@ -550,6 +600,38 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
         });
     });
     submitted
+}
+
+/// A single horizontally-scrolling row of cover tiles.
+///
+/// YouTube Music shows its shelves as carousels — one row that scrolls
+/// sideways — rather than a wrapping grid, which is what keeps a feed
+/// scannable instead of a wall of artwork.
+pub fn cover_row(
+    ui: &mut egui::Ui,
+    thumbs: &HashMap<String, egui::TextureHandle>,
+    items: &[SearchItem],
+    tile_width: f32,
+    selected: Option<&str>,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) -> Option<usize> {
+    let mut clicked = None;
+    egui::ScrollArea::horizontal().id_salt(id).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for (index, item) in items.iter().enumerate() {
+                let is_selected = selected
+                    .map(|key| {
+                        item.video_id.as_deref() == Some(key)
+                            || item.browse_id.as_deref() == Some(key)
+                    })
+                    .unwrap_or(false);
+                if cover_tile(ui, thumbs, item, tile_width, is_selected).clicked() {
+                    clicked = Some(index);
+                }
+            }
+        });
+    });
+    clicked
 }
 
 /// Lay out items as a wrapping grid of cover tiles.

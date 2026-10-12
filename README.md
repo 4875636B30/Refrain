@@ -31,7 +31,7 @@ password to hand over.
 | **Playback** | Streams through `yt-dlp` and caches to disk, so replays are instant. Seek, volume, shuffle, repeat, auto-advance. |
 | **Your library** | Thumbs up and down, playlists you can add to, and an "Up next" queue. |
 | **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
-| **Themes** | Light and dark, persisted in the config. |
+| **Themes** | Light and dark, persisted in the config. Roboto is bundled, so it looks the same on every desktop. |
 | **Keyboard** | Space, arrows, `Shift`+arrows, `/` and `Esc` — see [shortcuts](#keyboard-shortcuts). |
 
 ## Install
@@ -131,7 +131,8 @@ Working today:
 - Streaming playback with on-disk write-through, prefetching and a download fallback
 - Thumbs up / down, playlists you can add to, shuffle, repeat, "Up next" queue
 - MPRIS media controls, media keys and `playerctl`
-- Light and dark themes
+- Light and dark themes, with Roboto bundled rather than assumed
+- Feed shelves as sideways-scrolling carousels, as YouTube Music shows them
 - A release bundle with `yt-dlp` shipped beside the binary
 
 Not built yet:
