@@ -1919,6 +1919,10 @@ impl App {
                 }
             }
             if let View::Detail(page) = &self.view {
+                // The page's own header artwork. Album rows inherit it, which is
+                // why album pages looked fine without this — but a playlist's
+                // rows carry their own, so its cover was never fetched at all.
+                push(&page.thumbnail);
                 for track in &page.tracks {
                     push(&track.thumbnail);
                 }
