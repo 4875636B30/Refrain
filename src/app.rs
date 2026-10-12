@@ -2898,11 +2898,12 @@ impl App {
                     .weak()
                     .small(),
                 );
-                ui.label(
-                    RichText::new(format!("In use: {}", self.auth.browser))
-                        .weak()
-                        .small(),
-                );
+                let in_use = if self.auth.browser.trim().is_empty() {
+                    self.auth.mode.label()
+                } else {
+                    self.auth.browser.as_str()
+                };
+                ui.label(RichText::new(format!("In use: {in_use}")).weak().small());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Read cookies").weak().small());
@@ -2954,6 +2955,30 @@ impl App {
                             auth_changed = true;
                         }
                     });
+                }
+                if self.auth_pref.mode == AuthMode::File {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Cookies file").weak().small());
+                        let field = ui.add(
+                            egui::TextEdit::singleline(&mut self.auth_pref.cookies_file)
+                                .hint_text("path to a cookies.txt")
+                                .desired_width(240.0),
+                        );
+                        // Saved when editing stops rather than on each keystroke:
+                        // every save re-reads the session.
+                        if field.lost_focus() {
+                            auth_changed = true;
+                        }
+                    });
+                    // Worth saying before they wonder why nothing works.
+                    let path = self.auth_pref.cookies_file.trim();
+                    if !path.is_empty() && !std::path::Path::new(path).is_file() {
+                        ui.label(
+                            RichText::new("No file there.")
+                                .color(ui::WARN)
+                                .small(),
+                        );
+                    }
                 }
                 ui.add_space(4.0);
                 if ui

@@ -11,16 +11,30 @@ on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
+  # Also when this file changes, so a change to the checks is itself checked —
+  # otherwise the first run of a broken canary is the next morning's.
+  push:
+    paths:
+      - .github/workflows/canary.yml
 
 jobs:
   live:
-    runs-on: ubuntu-latest
+    # All three platforms. This is the only place the app is *run* on macOS and
+    # Windows — CI compiles and tests it there, which proves far less: whether
+    # the binary starts, finds yt-dlp beside itself, finds a JavaScript runtime,
+    # and can still talk to YouTube are all runtime questions.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       # Only what the binary needs to link. The checks themselves run without a
       # display.
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -36,18 +50,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Latest on purpose: the point is to catch yt-dlp falling behind YouTube.
-      - name: Install yt-dlp
-        run: |
-          sudo curl -fsSL -o /usr/local/bin/yt-dlp \
-            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
-          sudo chmod +x /usr/local/bin/yt-dlp
-          yt-dlp --version
+      - name: Build
+        run: cargo build --release
 
-      # Node ships on the runners; naming it here documents that yt-dlp needs
-      # one of these to solve YouTube's JS challenges.
+      # Latest on purpose: the point is to catch yt-dlp falling behind YouTube.
+      # It goes *beside the binary*, which is where the resolver looks first and
+      # which is what a released bundle does.
+      - name: Install yt-dlp beside the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Linux)   asset=yt-dlp_linux ;;
+            macOS)   asset=yt-dlp_macos ;;
+            Windows) asset=yt-dlp.exe ;;
+          esac
+          curl -fsSL -o "target/release/$asset" \
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$asset"
+          chmod +x "target/release/$asset" || true
+          ./target/release/$asset --version
+
+      # Node ships on the runners, and naming it here documents that yt-dlp
+      # needs one of these to solve YouTube's challenges. On Windows this also
+      # exercises the `.exe` suffix in the runtime lookup, which was a bug.
       - name: Check the JavaScript runtime
         run: node --version
 
       - name: Canary
-        run: cargo run --release -- --canary
+        shell: bash
+        run: |
+          # Windows builds `refrain.exe`; naming it beats hoping the shell
+          # appends the suffix.
+          bin=./target/release/refrain
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          "$bin" --canary
