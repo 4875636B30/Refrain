@@ -172,6 +172,7 @@ cargo test
 Useful diagnostics, all of which run without a GUI:
 
 ```sh
+cargo run -- --canary                 # check the live API and yt-dlp still work
 cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --probe "daft punk"      # exercise search + browse
 cargo run -- --page FEmusic_home      # dump a page's tracks and shelves

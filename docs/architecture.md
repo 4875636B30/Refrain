@@ -350,6 +350,7 @@ Everything below runs without a GUI, which is what makes them useful on a
 machine with no display:
 
 ```sh
+cargo run -- --canary                 # check the live API and yt-dlp still work
 cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --probe "daft punk"      # exercise search + browse
 cargo run -- --page FEmusic_home      # dump a page's tracks and shelves

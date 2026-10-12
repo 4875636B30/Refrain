@@ -1,0 +1,53 @@
+name: Canary
+
+# YouTube's response shapes change without notice, and the parser fails
+# *quietly* when they do: an empty list looks like "no results", not like a bug.
+# This runs the live checks daily so a breakage is noticed here rather than by
+# whoever installs the app next — and so a yt-dlp that has fallen behind shows
+# up as a failing run instead of as "playback stopped working".
+#
+# A failure here is not necessarily a code bug: it means "look at this".
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only what the binary needs to link. The checks themselves run without a
+      # display.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Latest on purpose: the point is to catch yt-dlp falling behind YouTube.
+      - name: Install yt-dlp
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/yt-dlp \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
+          sudo chmod +x /usr/local/bin/yt-dlp
+          yt-dlp --version
+
+      # Node ships on the runners; naming it here documents that yt-dlp needs
+      # one of these to solve YouTube's JS challenges.
+      - name: Check the JavaScript runtime
+        run: node --version
+
+      - name: Canary
+        run: cargo run --release -- --canary

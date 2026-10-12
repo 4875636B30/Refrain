@@ -23,7 +23,9 @@ jobs:
             libxcursor-dev \
             libxrandr-dev \
             libxi-dev \
-            libgl1-mesa-dev
+            libgl1-mesa-dev \
+            appstream \
+            desktop-file-utils
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,6 +41,13 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+      # The launcher entry and AppStream metadata are easy to break by hand and
+      # nothing else would notice.
+      - name: Validate packaging metadata
+        run: |
+          desktop-file-validate packaging/refrain.desktop
+          appstreamcli validate --no-net packaging/refrain.metainfo.xml
 
       - name: Build
         run: cargo build --release

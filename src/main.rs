@@ -12,6 +12,16 @@ mod ytm;
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    // `--canary` checks the things that break silently, for CI to run on a
+    // schedule: see the workflow for why.
+    if args.iter().any(|a| a == "--canary") {
+        if let Err(e) = canary_cmd() {
+            eprintln!("\ncanary failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // `--version` so a bug report can say which build it is.
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("refrain {}", env!("CARGO_PKG_VERSION"));
@@ -539,6 +549,105 @@ fn download_cmd(video_id: &str) -> anyhow::Result<()> {
         duration, samples
     );
     Ok(())
+}
+
+/// Check the parts that would otherwise break silently.
+///
+/// Our parsing depends on YouTube's response shapes, which change without
+/// notice and fail *quietly* — an empty list looks like "no results", not like
+/// a bug. This asserts on the live API instead, and on yt-dlp still working.
+///
+/// It runs **anonymously**, because CI has no browser session, which means it
+/// exercises the paths that work without one. Targets are found by searching
+/// rather than hard-coded, so the check doesn't rot as videos and playlists get
+/// removed.
+fn canary_cmd() -> anyhow::Result<()> {
+    use config::AuthMode;
+    use ytm::{Client, SearchFilter};
+
+    let (lang, country) = config::Config::locale();
+    let rt = tokio::runtime::Runtime::new()?;
+    let client = Client::new(&lang, &country, None)?;
+    let mut failures: Vec<String> = Vec::new();
+
+    // 1. Search — and it hands us a real video to test yt-dlp with below.
+    let songs = match rt.block_on(client.search("daft punk", SearchFilter::Songs)) {
+        Ok((items, more)) => {
+            println!(
+                "ok      search: {} songs, next page: {}",
+                items.len(),
+                more.is_some()
+            );
+            items
+        }
+        Err(e) => {
+            failures.push(format!("search failed: {e}"));
+            Vec::new()
+        }
+    };
+
+    // 2. A detail page, found by searching rather than hard-coded.
+    match songs.iter().find_map(|item| item.video_id.clone()) {
+        Some(video_id) => {
+            println!("ok      search returned a video id: {video_id}");
+
+            // 3. yt-dlp must be present, run, and still resolve a stream. A bot
+            //    check is YouTube answering rather than yt-dlp breaking, so it
+            //    is a note; anything else means playback is broken.
+            match audio::resolver::locate_ytdlp() {
+                Some(path) => {
+                    let version = audio::resolver::ytdlp_version(&path);
+                    println!(
+                        "ok      yt-dlp: {} ({})",
+                        path.display(),
+                        version.as_deref().unwrap_or("no version reported")
+                    );
+                    if version.is_none() {
+                        failures.push("yt-dlp did not report a version".to_string());
+                    }
+                    let anonymous = config::AuthConfig {
+                        mode: AuthMode::None,
+                        ..Default::default()
+                    };
+                    match rt.block_on(audio::resolver::resolve_url(&video_id, &anonymous)) {
+                        Ok(_) => println!("ok      yt-dlp resolved a stream URL"),
+                        Err(e) => {
+                            let message = e.to_string();
+                            if message.to_lowercase().contains("bot check") {
+                                println!(
+                                    "note    yt-dlp was bot-checked — YouTube answering, not us"
+                                );
+                            } else {
+                                failures
+                                    .push(format!("yt-dlp could not resolve a stream: {message}"));
+                            }
+                        }
+                    }
+                }
+                None => failures.push("yt-dlp not found".to_string()),
+            }
+        }
+        None => failures.push("no video id in the search results".to_string()),
+    }
+
+    // 4. The home feed, which is a different parser path (shelves rather than
+    //    a track list).
+    match rt.block_on(client.browse("FEmusic_home")) {
+        Ok(page) if !page.shelves.is_empty() => {
+            println!("ok      home feed: {} shelves", page.shelves.len())
+        }
+        Ok(page) => failures.push(format!("home feed parsed {} shelves", page.shelves.len())),
+        Err(e) => failures.push(format!("home feed failed: {e}")),
+    }
+
+    if failures.is_empty() {
+        println!("\ncanary passed");
+        return Ok(());
+    }
+    for failure in &failures {
+        eprintln!("FAIL    {failure}");
+    }
+    anyhow::bail!("{} check(s) failed", failures.len())
 }
 
 fn like_status_cmd(video_id: &str) -> anyhow::Result<()> {
