@@ -12,7 +12,7 @@ A lightweight desktop client for YouTube Music, written in Rust.</p>
   <a href="../../releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/4875636B30/Refrain?style=flat-square&color=ff0000"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2b2b2b?style=flat-square"></a>
   <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-000000?style=flat-square&logo=rust&logoColor=white">
-  <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux_x86_64-ff0000?style=flat-square">
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux_%C2%B7_macOS_%C2%B7_Windows-ff0000?style=flat-square">
 </p>
 
 ![Refrain's home feed: quick picks, cover art, and the player bar](docs/screenshot.png)
@@ -54,6 +54,21 @@ It carries `yt-dlp` inside, so playback works without installing anything else
 (you still need a JavaScript runtime — `node` or `deno` — and `ffmpeg` for the
 fallback path).
 
+### macOS
+
+Download the tarball from [Releases](../../releases) and move `refrain.app` to
+your Applications folder. It is not signed, so macOS will refuse the first
+launch: right-click the app, choose **Open**, and confirm. (Or
+`xattr -dr com.apple.quarantine refrain.app`.)
+
+Both Apple silicon and Intel builds are published.
+
+### Windows
+
+Download the `.zip` from [Releases](../../releases) and unzip it wherever you
+like — `refrain.exe` runs from there, with `yt-dlp.exe` beside it. SmartScreen
+will ask before running an unknown publisher's executable.
+
 ### Release bundle (Linux x86_64)
 
 Download the tarball from [Releases](../../releases), then install it for your
@@ -90,6 +105,7 @@ cargo run --release
 **To run it:**
 
 - **`yt-dlp`** — found on `PATH`, at `~/.local/bin/yt-dlp`, or set `YTDLP_PATH`.
+  Every release bundle ships one for its platform.
   The release bundle ships one, and if you have a *newer* copy elsewhere that
   one is used instead: yt-dlp is the part that breaks when YouTube changes, so
   a stale bundled copy would otherwise take playback down with it. Settings
@@ -103,8 +119,9 @@ cargo run --release
 **To build it:**
 
 - Rust (stable)
-- `alsa-lib-devel` (ALSA, for `rodio`)
-- X11 and Wayland development libraries (for `eframe`/`winit`)
+- On Linux: `alsa-lib-devel` for `rodio`, and X11/Wayland development libraries
+  for `eframe`/`winit`. macOS and Windows need nothing beyond the toolchain —
+  CoreAudio and WASAPI ship with the OS
 - For Chromium-family browsers on Linux, Python **`secretstorage`** may be needed
   to decrypt cookies from the OS keyring
 
@@ -162,8 +179,10 @@ Working today:
 - Artwork fetched only for items actually on screen (a feed asks for ~20 images
   instead of ~200)
 - Sign-in configurable in-app: source, browser and keyring
-- A release bundle with `yt-dlp` shipped beside the binary, and an AppImage
-  that needs no installation at all
+- Linux (AppImage and tarball), macOS (`.app`, both architectures) and Windows
+  (`.zip`), each with `yt-dlp` shipped beside the executable
+- Desktop media controls on all three: MPRIS, and the macOS and Windows
+  equivalents through the same code
 
 Not built yet:
 

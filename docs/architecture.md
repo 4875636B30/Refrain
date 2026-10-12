@@ -245,6 +245,33 @@ channels and the playlist's owner need not be the account's active one, so
 comparing against the signed-in channel does not work. The server stays the real
 authority; a refusal is shown rather than swallowed.
 
+## Platforms
+
+The same code builds for Linux, macOS and Windows; CI builds and tests all
+three, because several pieces cannot be exercised on one of them.
+
+- **Finding `yt-dlp`** looks for the platform's name beside the executable
+  (`yt-dlp_linux`, `yt-dlp_macos`, `yt-dlp.exe`), and a binary on `PATH` is
+  looked up *with* the platform's suffix — on Windows the file is `node.exe`,
+  and looking for `node` finds nothing, which would silently leave yt-dlp
+  without a JavaScript runtime.
+- **Browser profiles** are discovered explicitly on Linux only. Elsewhere the
+  browser *name* is handed to yt-dlp and it finds the profile itself: it knows
+  those layouts and keeps them current, and the keyring quirk that makes an
+  explicit path necessary is a Linux one. `BROWSER+KEYRING` is likewise only
+  built on Linux, where yt-dlp uses it.
+- **Media controls** go through souvlaki, which needs a window handle on
+  Windows for the system transport controls — and only there. It is taken from
+  eframe's `CreationContext` and passed in; without one the platform call fails
+  and the app simply has no media controls.
+- **The Windows build has no console** in release (`windows_subsystem`), so no
+  black window opens beside the GUI. Debug builds keep it, because that is where
+  the diagnostics go.
+
+None of this is verified by running the app on those platforms — only by CI
+building and testing them. macOS and Windows runtime behaviour is the part to
+be suspicious of.
+
 ## Typography
 
 Roboto is bundled (`assets/fonts/`, Apache-2.0) rather than taken from the

@@ -229,6 +229,28 @@ enum Repeat {
     One,
 }
 
+/// The window handle souvlaki needs on Windows, and nowhere else.
+///
+/// Windows is the only platform that requires one; asking for it elsewhere
+/// would be a dependency and an unsafe cast for nothing.
+fn window_handle(cc: &eframe::CreationContext<'_>) -> Option<*mut std::ffi::c_void> {
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+        if let Ok(handle) = cc.window_handle()
+            && let RawWindowHandle::Win32(win32) = handle.as_raw()
+        {
+            return Some(win32.hwnd.get() as *mut std::ffi::c_void);
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cc;
+        None
+    }
+}
+
 /// Resolve browser cookies in the background and report back on the channel.
 ///
 /// `fresh` forces a new extraction instead of reusing the cached jar, which is
@@ -679,7 +701,7 @@ impl App {
         // so they are handled on the UI thread like any other input.
         let media_ctx = cc.egui_ctx.clone();
         let media_tx = tx.clone();
-        let media = media::Controls::new(move |command| {
+        let media = media::Controls::new(window_handle(cc), move |command| {
             let _ = media_tx.send(Msg::Media(command));
             media_ctx.request_repaint();
         });

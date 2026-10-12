@@ -1,5 +1,9 @@
 //! Refrain — a fast, low-memory desktop client for YouTube Music.
 
+// A GUI app on Windows should not open a console beside itself. Debug builds
+// keep it, because that is where the diagnostics go.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod auth;

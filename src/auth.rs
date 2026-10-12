@@ -444,9 +444,23 @@ fn home() -> PathBuf {
 }
 
 /// Candidate `(browser, user_data_or_profile_dir)` pairs to try, in order.
+///
+/// An empty path means "let yt-dlp find it", which is what macOS and Windows
+/// use: yt-dlp knows those layouts and keeps them current, and there is no
+/// keyring quirk to work around as there is on Linux — where the whole reason
+/// for naming a path and a keyring is that yt-dlp's own guess lands on
+/// `BASICTEXT` and silently fails to decrypt.
 fn candidates() -> Vec<(String, PathBuf)> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
 
+    #[cfg(not(target_os = "linux"))]
+    {
+        for browser in crate::config::KNOWN_BROWSERS {
+            out.push((browser.to_string(), PathBuf::new()));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     // Firefox: profiles live under an XDG path on modern builds.
     for base in [
         home().join(".config/mozilla/firefox"),
@@ -473,12 +487,14 @@ fn candidates() -> Vec<(String, PathBuf)> {
         ("vivaldi", ".config/vivaldi"),
         ("opera", ".config/opera"),
     ];
+    #[cfg(target_os = "linux")]
     for (browser, rel) in chromium {
         let dir = home().join(rel);
         if dir.join("Default/Cookies").is_file() || dir.join("Default/Network/Cookies").is_file() {
             out.push((browser.to_string(), dir));
         }
     }
+
     out
 }
 

@@ -3697,6 +3697,7 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "raw-window-handle",
  "reqwest",
  "rodio",
  "serde",

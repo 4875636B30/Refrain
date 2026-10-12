@@ -1,7 +1,8 @@
 name: Release
 
-# Tag a commit (`git tag v0.1.0 && git push --tags`) to publish a bundle, or run
-# this by hand from the Actions tab to test it.
+# Tag a commit (`git tag v0.1.1 && git push --tags`) to publish, or run this by
+# hand from the Actions tab to test it. A manual run builds and verifies but
+# does not publish, since the version comes from the tag.
 on:
   push:
     tags: ["v*"]
@@ -11,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  linux-x86_64:
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,9 +38,9 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      # Shipped beside the binary, which is the second place the resolver looks.
-      # Deliberately whatever upstream currently calls latest: yt-dlp breaks
-      # whenever YouTube changes, and a pinned copy would rot between releases.
+      # Shipped beside the binary, which is where the resolver looks. Latest
+      # rather than pinned: yt-dlp breaks whenever YouTube changes, so a pinned
+      # copy would rot between releases.
       - name: Fetch yt-dlp
         run: |
           set -euo pipefail
@@ -110,30 +111,188 @@ jobs:
             > canary-appimage.txt
           cat canary-appimage.txt
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+            *.AppImage
+
+  macos:
+    # Both architectures, built on one runner: Apple's toolchain cross-compiles,
+    # and yt-dlp_macos is a universal binary, so one copy serves both.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Fetch yt-dlp
+        run: |
+          set -euo pipefail
+          curl -fsSL -o yt-dlp_macos \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
+          chmod +x yt-dlp_macos
+          ./yt-dlp_macos --version
+
+      # A .app rather than a bare binary, so it can be double-clicked. yt-dlp
+      # goes in Contents/MacOS beside the executable, which is where the
+      # resolver looks.
+      - name: Assemble the bundle
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          arch="${{ matrix.target }}"
+          app="refrain.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/$arch/release/refrain" "$app/Contents/MacOS/"
+          cp yt-dlp_macos "$app/Contents/MacOS/"
+          cp packaging/refrain.icns "$app/Contents/Resources/"
+          cp README.md LICENSE "$app/Contents/"
+
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Refrain</string>
+            <key>CFBundleDisplayName</key><string>Refrain</string>
+            <key>CFBundleIdentifier</key><string>io.github.4875636B30.Refrain</string>
+            <key>CFBundleExecutable</key><string>refrain</string>
+            <key>CFBundleIconFile</key><string>refrain.icns</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${version}</string>
+            <key>CFBundleVersion</key><string>${version}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+          </dict>
+          </plist>
+          PLIST
+
+          name="refrain-${version}-macos-${arch}"
+          mkdir -p dist
+          cp -R "$app" "dist/${name}.app"
+          tar -C dist -czf "${name}.tar.gz" "${name}.app"
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      # The checks need a JavaScript runtime for yt-dlp's challenges; the runner
+      # has Node, and naming it here makes the dependency explicit.
+      - name: Verify the bundle runs
+        run: |
+          set -euo pipefail
+          node --version
+          arch="${{ matrix.target }}"
+          if [ "$(uname -m)" = "arm64" ] && [ "$arch" = "x86_64-apple-darwin" ]; then
+            echo "skipping: running the other architecture would need Rosetta"
+          elif [ "$(uname -m)" = "x86_64" ] && [ "$arch" = "aarch64-apple-darwin" ]; then
+            echo "skipping: running the other architecture would need Rosetta"
+          else
+            ./refrain.app/Contents/MacOS/refrain --canary
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Fetch yt-dlp
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -OutFile yt-dlp.exe
+          .\yt-dlp.exe --version
+
+      - name: Assemble the bundle
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $name = "refrain-$version-windows-x86_64"
+          New-Item -ItemType Directory -Path $name -Force | Out-Null
+          Copy-Item target/release/refrain.exe $name
+          # Beside the binary is where the resolver looks for it.
+          Copy-Item yt-dlp.exe $name
+          Copy-Item README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+
+      - name: Verify the bundle runs
+        shell: pwsh
+        run: |
+          node --version
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          & ".\refrain-$version-windows-x86_64\refrain.exe" --canary
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            *.zip
+            *.zip.sha256
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    # Only a tag publishes; a manual run stops after the builds are verified.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             *.tar.gz
             *.tar.gz.sha256
+            *.zip
+            *.zip.sha256
             *.AppImage
           generate_release_notes: true
           body: |
-            Built for Linux x86_64, as an AppImage and as a tarball.
+            Linux, macOS and Windows builds. Each one carries `yt-dlp` beside the
+            executable, which is where Refrain looks for it — and a newer copy
+            elsewhere on your system is used in preference, so playback keeps
+            working as yt-dlp is updated.
 
-            **AppImage** — one file, nothing to install:
+            | platform | file |
+            | --- | --- |
+            | Linux (x86_64) | `.AppImage` — one file, `chmod +x` and run — or the tarball |
+            | macOS (Apple silicon / Intel) | tarball containing `refrain.app` |
+            | Windows (x86_64) | `.zip` with `refrain.exe` |
 
-            ```sh
-            chmod +x refrain-*-x86_64.AppImage
-            ./refrain-*-x86_64.AppImage
-            ```
+            **None of these are signed.** macOS will refuse a downloaded `.app`
+            until you allow it — right-click, *Open*, then confirm — and Windows
+            SmartScreen will ask before running an unknown publisher's `.exe`.
 
-            **Tarball** — if you would rather place the files yourself; see the
-            README for the install commands.
-
-            The bundle contains `yt-dlp_linux` next to the binary, which is where
-            the app looks for it first.
-
-            `ffmpeg` is a runtime dependency, but only for the fallback that
-            transcodes a stream the fast path could not use — install it if you
-            hit tracks that refuse to play.
+            You still need a **JavaScript runtime** (`node` or `deno`) for
+            playback, and `ffmpeg` for the fallback path that transcodes a stream
+            the fast path could not use.

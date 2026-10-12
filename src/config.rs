@@ -235,6 +235,9 @@ impl AuthConfig {
                     return Vec::new();
                 }
                 let mut spec = browser.to_string();
+                // `BROWSER+KEYRING` is Linux-only; yt-dlp knows its own way
+                // around the macOS and Windows stores.
+                #[cfg(target_os = "linux")]
                 if !self.keyring.trim().is_empty() {
                     spec.push('+');
                     spec.push_str(self.keyring.trim());

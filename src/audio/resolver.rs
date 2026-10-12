@@ -15,10 +15,15 @@ use tokio::process::Command;
 
 const DOWNLOAD_TIMEOUT_SECS: u64 = 180;
 
+/// A binary on `PATH`, with the platform's executable suffix.
+///
+/// Windows needs this: the file is `node.exe`, and looking for `node` finds
+/// nothing — which silently leaves yt-dlp without a JavaScript runtime, and
+/// playback fails with a confusing challenge error.
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
+        .map(|dir| dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
         .find(|p| p.is_file())
 }
 
@@ -80,7 +85,7 @@ fn search_path() -> Option<PathBuf> {
 /// as a self-contained bundle.
 fn beside_executable() -> Option<PathBuf> {
     let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    ["yt-dlp", "yt-dlp_linux", "yt-dlp.exe"]
+    ["yt-dlp", "yt-dlp_linux", "yt-dlp_macos", "yt-dlp.exe"]
         .iter()
         .map(|name| dir.join(name))
         .find(|candidate| candidate.is_file())

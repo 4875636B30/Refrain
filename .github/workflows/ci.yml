@@ -7,12 +7,23 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # All three platforms, because "it works on my machine" is exactly the
+    # failure this is here to catch: the code has platform-specific pieces
+    # (browser profile discovery, the Windows window handle for media controls,
+    # executable lookup with `.exe`) that cannot be exercised on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # Native deps for rodio (ALSA) and eframe/winit (X11 + Wayland).
+      # Native deps for rodio (ALSA) and eframe/winit (X11 + Wayland). macOS and
+      # Windows need nothing: CoreAudio and WASAPI come with the OS, and winit
+      # links against the system frameworks.
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -42,12 +53,13 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Build
+        run: cargo build --release
+
       # The launcher entry and AppStream metadata are easy to break by hand and
-      # nothing else would notice.
+      # nothing else would notice. Linux-only files, so Linux-only checks.
       - name: Validate packaging metadata
+        if: runner.os == 'Linux'
         run: |
           desktop-file-validate packaging/refrain.desktop
           appstreamcli validate --no-net packaging/refrain.metainfo.xml
-
-      - name: Build
-        run: cargo build --release

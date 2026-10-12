@@ -40,11 +40,19 @@ pub struct Controls {
 
 impl Controls {
     /// Connect to the desktop, forwarding requests to `on_command`.
-    pub fn new(on_command: impl Fn(Command) + Send + 'static) -> Self {
+    ///
+    /// `hwnd` is the window handle, which Windows requires for the media
+    /// transport controls; it is ignored elsewhere. Without one the platform
+    /// call fails and the app simply has no media controls, which is why this
+    /// is worth plumbing rather than leaving as `None`.
+    pub fn new(
+        hwnd: Option<*mut std::ffi::c_void>,
+        on_command: impl Fn(Command) + Send + 'static,
+    ) -> Self {
         let config = PlatformConfig {
             dbus_name: "refrain",
             display_name: "Refrain",
-            hwnd: None,
+            hwnd,
         };
 
         let Ok(mut inner) = MediaControls::new(config) else {
