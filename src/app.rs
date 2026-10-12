@@ -1258,7 +1258,7 @@ impl App {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (space, left, right, escape, slash, shift) = ctx.input(|i| {
+        let (space, left, right, escape, slash, shift, queue, settings) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Space),
                 i.key_pressed(egui::Key::ArrowLeft),
@@ -1266,14 +1266,41 @@ impl App {
                 i.key_pressed(egui::Key::Escape),
                 i.key_pressed(egui::Key::Slash),
                 i.modifiers.shift,
+                i.key_pressed(egui::Key::Q),
+                i.key_pressed(egui::Key::Comma),
             )
         });
+
+        if queue {
+            self.show_queue = !self.show_queue;
+        }
+        if settings {
+            if self.show_settings {
+                self.show_settings = false;
+            } else {
+                self.cache_usage = resolver::cache_usage();
+                self.show_settings = true;
+            }
+        }
 
         if slash {
             ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(ui::SEARCH_ID)));
             return;
         }
         if escape {
+            // Whatever is on top closes first: a dialog that ignores Esc feels
+            // stuck, and the view behind it should not move.
+            if self.show_settings {
+                self.show_settings = false;
+                return;
+            }
+            if self.picker.is_some() {
+                self.picker = None;
+                return;
+            }
+            if self.renaming.take().is_some() || self.deleting.take().is_some() {
+                return;
+            }
             if let Some((nav, view)) = self.view_history.pop() {
                 self.nav = nav;
                 self.view = view;

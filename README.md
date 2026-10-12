@@ -120,13 +120,16 @@ cargo run -- --auth-check --refresh
 | `→` / `←` | Seek forward / back 5 s |
 | `Shift`+`→` / `Shift`+`←` | Next / previous track |
 | `/` | Focus search |
-| `Esc` | Back |
+| `Q` | Show / hide the queue |
+| `,` | Settings |
+| `Esc` | Close a dialog, or go back |
 
 ## Status
 
 Working today:
 
-- Filtered search, grouped results, and "See more" per category
+- Filtered search, grouped results, "See more" per category, and paging within
+  an expanded category
 - Home and Library feeds, with shelves paged in via continuations
 - Album, artist and playlist pages, with artwork and carousels
 - Streaming playback with on-disk write-through, prefetching and a download fallback

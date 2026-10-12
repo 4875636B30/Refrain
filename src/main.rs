@@ -12,6 +12,12 @@ mod ytm;
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    // `--version` so a bug report can say which build it is.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("refrain {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     if args.iter().any(|a| a == "--auth-check") {
         if args.iter().any(|a| a == "--refresh") {
             auth::clear_cache();
