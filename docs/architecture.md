@@ -311,7 +311,19 @@ past 90 days — so a stale copy is visible rather than mysterious.
 A release bundle is therefore the binary plus `yt-dlp_linux`, plus `ffmpeg`
 (needed only for the download fallback).
 
-Tagging a commit (`git tag v0.1.0 && git push --tags`) runs
+A second build step wraps the same pieces in an **AppImage**: an `AppDir` with
+`usr/bin/refrain` and `usr/bin/yt-dlp_linux`, a desktop file, an icon and an
+`AppRun` symlink, packed by `appimagetool`. Inside the image the binary runs
+from a temporary mount point, so `beside_executable()` resolves to
+`<mount>/usr/bin` and the bundled `yt-dlp` is found — verified by running the
+image's own `--canary`, which reports the path it used.
+
+It is an AppImage rather than a Flatpak for a specific reason: yt-dlp needs a
+JavaScript runtime to solve YouTube's challenges, and a sandbox would need one
+*inside* it — which means bundling a whole Node. An AppImage has no such
+problem, because it can use the host's.
+
+Tagging a commit (`git tag v0.1.1 && git push --tags`) runs
 `.github/workflows/release.yml`, which builds with `--locked`, fetches the current
 `yt-dlp_linux`, assembles the bundle, checks that the unpacked binary still
 resolves a track, and attaches it to a GitHub release. The bundle is about 50 MB,

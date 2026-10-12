@@ -40,6 +40,20 @@ password to hand over.
 
 ## Install
 
+### AppImage (Linux x86_64)
+
+One file, nothing to install — download it from [Releases](../../releases) and
+run it:
+
+```sh
+chmod +x refrain-*-x86_64.AppImage
+./refrain-*-x86_64.AppImage
+```
+
+It carries `yt-dlp` inside, so playback works without installing anything else
+(you still need a JavaScript runtime — `node` or `deno` — and `ffmpeg` for the
+fallback path).
+
 ### Release bundle (Linux x86_64)
 
 Download the tarball from [Releases](../../releases), then install it for your
@@ -148,7 +162,8 @@ Working today:
 - Artwork fetched only for items actually on screen (a feed asks for ~20 images
   instead of ~200)
 - Sign-in configurable in-app: source, browser and keyring
-- A release bundle with `yt-dlp` shipped beside the binary
+- A release bundle with `yt-dlp` shipped beside the binary, and an AppImage
+  that needs no installation at all
 
 Not built yet:
 

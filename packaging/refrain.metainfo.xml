@@ -59,6 +59,13 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.1" date="2026-10-12">
+      <description>
+        <p>Packaged as an AppImage as well as a tarball.</p>
+        <p>Artwork is fetched only for what is on screen, and sign-in can be
+           configured in the app rather than in the config file.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-11">
       <description>
         <p>First release.</p>

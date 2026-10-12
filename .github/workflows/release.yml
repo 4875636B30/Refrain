@@ -62,6 +62,32 @@ jobs:
           tar -C dist -czf "${name}.tar.gz" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
 
+      # A single file you can download, chmod and run — and the reason it is an
+      # AppImage rather than a Flatpak: yt-dlp needs a JavaScript runtime to
+      # solve YouTube's challenges, and a sandbox would need one inside it,
+      # which means bundling a whole Node.
+      - name: Build an AppImage
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p AppDir/usr/bin
+          cp target/release/refrain AppDir/usr/bin/
+          # Beside the binary is where the resolver looks for it.
+          cp yt-dlp_linux AppDir/usr/bin/
+          cp packaging/refrain.desktop AppDir/
+          cp packaging/refrain.svg AppDir/
+          cp packaging/refrain.svg AppDir/.DirIcon
+          ln -sf usr/bin/refrain AppDir/AppRun
+
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          # No FUSE on a runner, so unpack the tool and run it directly.
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir \
+            "refrain-${version}-x86_64.AppImage"
+          # The tool unpacks itself into the working directory.
+          rm -rf AppDir appimagetool squashfs-root
+
       - name: Verify the bundle runs
         run: |
           set -euo pipefail
@@ -74,15 +100,36 @@ jobs:
           ./refrain-${version}-linux-x86_64/refrain --canary > canary.txt
           cat canary.txt
 
+      # The AppImage is checked the same way, which also proves yt-dlp is found
+      # through the mount point the runtime creates.
+      - name: Verify the AppImage runs
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          ./refrain-${version}-x86_64.AppImage --appimage-extract-and-run --canary \
+            > canary-appimage.txt
+          cat canary-appimage.txt
+
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             *.tar.gz
             *.tar.gz.sha256
+            *.AppImage
           generate_release_notes: true
           body: |
-            Built for Linux x86_64. Unpack and run `refrain`.
+            Built for Linux x86_64, as an AppImage and as a tarball.
+
+            **AppImage** — one file, nothing to install:
+
+            ```sh
+            chmod +x refrain-*-x86_64.AppImage
+            ./refrain-*-x86_64.AppImage
+            ```
+
+            **Tarball** — if you would rather place the files yourself; see the
+            README for the install commands.
 
             The bundle contains `yt-dlp_linux` next to the binary, which is where
             the app looks for it first.
