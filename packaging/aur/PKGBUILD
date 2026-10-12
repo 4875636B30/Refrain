@@ -3,7 +3,7 @@
 # The AUR wants a maintainer line with a contact address. Fill this in before
 # pushing, or there is nobody to blame when it breaks.
 
-pkgname=refrain-bin
+pkgname=refrain-music-bin
 pkgver=0.1.1
 pkgrel=1
 pkgdesc="Fast, low-memory desktop client for YouTube Music"
@@ -30,8 +30,9 @@ optdepends=(
   'ffmpeg: transcodes a stream the fast path could not use'
 )
 
-provides=('refrain')
-conflicts=('refrain')
+# No `provides`/`conflicts` for the plain name: `refrain` on the AUR is an
+# unrelated package (Discord Rich Presence for Apple Music), so claiming it
+# would be both confusing and rude.
 
 source=("${pkgname}-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/refrain-${pkgver}-linux-x86_64.tar.gz")
 sha256sums=('ea56e03a838e69e883d31495e0d71607cd9eebdf120d8eaa21f2378bc28dde68')

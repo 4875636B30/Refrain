@@ -1,7 +1,7 @@
-# AUR: `refrain-bin`
+# AUR: `refrain-music-bin`
 
 The AUR is a git repository per package, so this directory is a *template* to
-copy into `ssh://aur@aur.archlinux.org/refrain-bin.git` — nobody can push it but
+copy into `ssh://aur@aur.archlinux.org/refrain-music-bin.git` — nobody can push it but
 the maintainer named in the PKGBUILD.
 
 ## Before pushing
@@ -22,11 +22,17 @@ the maintainer named in the PKGBUILD.
 
 ```sh
 git clone ssh://aur@aur.archlinux.org/refrain-bin.git
-cp PKGBUILD .SRCINFO refrain-bin/
-cd refrain-bin && git add PKGBUILD .SRCINFO
+cp PKGBUILD .SRCINFO refrain-music-bin/
+cd refrain-music-bin && git add PKGBUILD .SRCINFO
 git commit -m "Initial import: refrain-bin 0.1.1"
 git push
 ```
+
+## Why not `refrain-bin`
+
+`refrain` on the AUR is an unrelated package — Discord Rich Presence for Apple
+Music — so `refrain-bin` would read as its binary build. `refrain-music-bin`
+says what it is instead, and nothing is claimed from the plain name.
 
 ## What the package does and does not ship
 

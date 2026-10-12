@@ -65,6 +65,13 @@ modules:
       - type: file
         url: https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp
         sha256: 1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6
+        # So the version bump is a pull request rather than a chore nobody
+        # remembers: Flathub's bot watches the upstream release.
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest
+          version-query: .tag_name
+          url-query: '"https://github.com/yt-dlp/yt-dlp/releases/download/" + $version + "/yt-dlp"'
 
   - name: refrain
     buildsystem: simple
@@ -88,5 +95,11 @@ modules:
         url: https://github.com/4875636B30/Refrain/archive/refs/tags/v0.1.1.tar.gz
         sha256: a17a886f152cd99cc722bc4e2904c78f2ca77c3fdd0a93d8de49e9df1e228752
         strip-components: 1
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/4875636B30/Refrain/releases/latest
+          tag-query: .tag_name
+          version-query: $tag | sub("^v"; "")
+          url-query: '"https://github.com/4875636B30/Refrain/archive/refs/tags/v" + $version + ".tar.gz"'
       # Every crate, vendored, so the build works with no network.
       - cargo-sources.json
