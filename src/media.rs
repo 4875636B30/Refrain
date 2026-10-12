@@ -137,11 +137,29 @@ impl Controls {
         }
     }
 
+    /// Publish the volume to the desktop, where the desktop has such a thing.
+    ///
+    /// MPRIS exposes volume as a property the desktop can also set, and
+    /// souvlaki implements it only there: its macOS and Windows backends have
+    /// `new`, `attach`, `set_metadata` and `set_playback` and nothing else. The
+    /// condition below is souvlaki's own, since that is what decides whether
+    /// the method exists — and on the platforms without it, the app's volume is
+    /// the only volume there is.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
     pub fn set_volume(&mut self, volume: f32) {
         if let Some(inner) = self.inner.as_mut() {
             let _ = inner.set_volume(f64::from(volume));
         }
     }
+
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )))]
+    pub fn set_volume(&mut self, _volume: f32) {}
 }
 
 fn signed(amount: Duration, direction: SeekDirection) -> i64 {

@@ -65,6 +65,13 @@ sed -i 's/target_os = "linux"/any()/g; s/not(any())/all()/g' src/*.rs   # then r
 The usual failure this catches is code that is only *used* on Linux becoming
 dead on the others, which `-D warnings` turns into a build failure.
 
+What it cannot catch is a **dependency whose API differs per platform**: flipping
+our own `cfg`s does not change what `souvlaki`, say, exposes. `MediaControls`
+has `set_volume` on MPRIS and no such method on macOS or Windows, which only a
+real build there reveals. To check that class of problem, read the backend's
+public methods — `grep 'pub fn' src/platform/<backend>*.rs` in the crate's
+source is enough, and it beats waiting for CI.
+
 ## How the code is laid out
 
 [`docs/architecture.md`](docs/architecture.md) explains the design and the parts
