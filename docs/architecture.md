@@ -169,28 +169,30 @@ ownership of the source.
 
 ## Memory
 
-Measured on a release build with the home feed loaded: **~215 MB resident**,
-stable rather than creeping. Of that, roughly 83 MB is *shared* — the NVIDIA
-driver and `libLLVM`, mapped by every process that touches them — and about
-55 MB is what the feed adds on top of an empty window: artwork textures
-(200 cached at 160 px is ~20 MB) plus egui's texture staging.
+Measured on a release build with the home feed loaded: **~205 MB resident**,
+steady rather than creeping. Of that, roughly 83 MB is *shared* — the NVIDIA
+driver and `libLLVM`, mapped by every process that touches them — and the bulk
+of the rest is the GL driver's own private allocations. The app's own data is
+tens of megabytes, not hundreds.
 
-The clearest remaining win is lazy artwork: `ensure_thumbnails` queues art for
-*every* item in the view, so a feed of 15 shelves fetches artwork for items far
-below the fold. Fetching only what is visible would cut both the network and the
-texture count, but it needs per-item visibility recorded during the draw pass,
-which is a real refactor rather than a tweak.
+### Artwork is fetched only for what is on screen
 
+`ensure_thumbnails` used to scan the whole view, so a feed of fifteen shelves
+queued artwork for hundreds of items nobody had scrolled to. It now fetches what
+was actually *drawn*, which the widgets report as they draw it — a placeholder
+counts, which is what bootstraps the very first frame, when nothing has been
+drawn and so nothing is visible yet.
 
-- Artwork is decoded to at most 160 px and cached with a bounded LRU, so browsing
-  large feeds doesn't grow memory without limit.
-- The release profile strips symbols and uses thin LTO. An unstripped binary was
-  41 MB and its text and rodata are mapped into every running process, so it cost
-  resident memory as well as download size; stripped and LTO'd it is 29 MB.
-- Media is written to disk in bounded 16 MB chunks as it arrives, rather than
-  being buffered whole in memory.
-- Streams are read from `yt-dlp`'s stdout into memory as needed, and at most a
-  couple are held open for prefetching.
+Measured on the home feed: **212 → 20 images requested**, and textures held
+159 → 20 (about 14 MB of pixel data). Resident memory only moved 212 → 206 MB,
+because the driver dominates the total and glibc keeps freed pages in its arena
+rather than returning them to the OS — so the win here is requests, data and
+decode work, not the headline number. Worth knowing before promising a memory
+saving from it.
+
+A side effect that is a genuine improvement: the eviction guard now protects
+only artwork that is visible, instead of everything in the view, so scrolling
+away from a shelf lets its textures go.
 
 ## Authentication
 

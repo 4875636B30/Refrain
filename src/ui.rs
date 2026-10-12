@@ -1,6 +1,6 @@
 //! Reusable look-and-feel: theme, artwork tiles and list rows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use egui::{Align, Color32, Layout, RichText};
 
@@ -590,6 +590,34 @@ pub fn fmt_time(secs: f32) -> String {
 }
 
 /// Draw a cached thumbnail, or a neutral placeholder while it loads.
+/// Where artwork drawn on screen this frame is collected, so only that is
+/// fetched.
+///
+/// Kept in egui's memory rather than threaded through every widget signature:
+/// the draw code is the only place that knows what is actually visible, and
+/// adding a parameter to each of them would be a lot of plumbing for a set.
+const VISIBLE_THUMBS: &str = "visible-thumbnails";
+
+fn mark_visible(ui: &egui::Ui, uri: &str) {
+    ui.ctx().memory_mut(|memory| {
+        memory
+            .data
+            .get_temp_mut_or_default::<HashSet<String>>(egui::Id::new(VISIBLE_THUMBS))
+            .insert(uri.to_owned());
+    });
+}
+
+/// Take the artwork drawn since this was last called.
+pub fn take_visible_thumbnails(ctx: &egui::Context) -> HashSet<String> {
+    ctx.memory_mut(|memory| {
+        std::mem::take(
+            memory
+                .data
+                .get_temp_mut_or_default::<HashSet<String>>(egui::Id::new(VISIBLE_THUMBS)),
+        )
+    })
+}
+
 pub fn draw_thumbnail(
     ui: &mut egui::Ui,
     uri: Option<&str>,
@@ -597,18 +625,35 @@ pub fn draw_thumbnail(
     size: egui::Vec2,
     radius: f32,
 ) {
-    match uri.and_then(|u| thumbs.get(u)) {
+    let Some(uri) = uri else {
+        // No artwork to show and nothing to fetch.
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, radius, ui.visuals().widgets.inactive.bg_fill);
+        return;
+    };
+
+    match thumbs.get(uri) {
         Some(texture) => {
-            ui.add(
+            let response = ui.add(
                 egui::Image::from_texture(texture)
                     .fit_to_exact_size(size)
                     .corner_radius(radius),
             );
+            if ui.is_rect_visible(response.rect) {
+                mark_visible(ui, uri);
+            }
         }
         None => {
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             ui.painter()
                 .rect_filled(rect, radius, ui.visuals().widgets.inactive.bg_fill);
+            // A placeholder still counts as on screen, and its artwork still
+            // needs fetching. This is also what bootstraps the very first
+            // frame, when nothing has been drawn and so nothing is visible yet.
+            if ui.is_rect_visible(rect) {
+                mark_visible(ui, uri);
+            }
         }
     }
 }

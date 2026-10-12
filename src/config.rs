@@ -90,6 +90,47 @@ impl Config {
     }
 }
 
+/// The browsers `yt-dlp --cookies-from-browser` understands, offered in the
+/// settings window so nobody has to spell one correctly by hand.
+pub const KNOWN_BROWSERS: [&str; 8] = [
+    "firefox", "chrome", "chromium", "brave", "edge", "opera", "vivaldi", "whale",
+];
+
+/// Chromium-family keyrings to try, on Linux. Empty means "try each in turn",
+/// which is what the client does by default — and what it has to do, since
+/// yt-dlp's own guess lands on `BASICTEXT` and silently fails to decrypt.
+pub const KNOWN_KEYRINGS: [&str; 5] = ["", "GNOMEKEYRING", "KWALLET6", "KWALLET", "BASICTEXT"];
+
+impl AuthMode {
+    pub const ALL: [AuthMode; 4] = [
+        AuthMode::Auto,
+        AuthMode::Browser,
+        AuthMode::File,
+        AuthMode::None,
+    ];
+
+    /// How it reads in the settings window.
+    pub fn label(self) -> &'static str {
+        match self {
+            AuthMode::Auto => "Detect automatically",
+            AuthMode::Browser => "From a browser",
+            AuthMode::File => "From a cookies file",
+            AuthMode::None => "Never send cookies",
+        }
+    }
+}
+
+/// How a keyring choice reads in the settings window.
+pub fn keyring_label(keyring: &str) -> &str {
+    match keyring {
+        "" => "Try each in turn",
+        "GNOMEKEYRING" => "GNOME Keyring",
+        "KWALLET6" | "KWALLET" => "KWallet",
+        "BASICTEXT" => "Plain text",
+        other => other,
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {

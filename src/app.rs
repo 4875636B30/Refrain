@@ -19,6 +19,7 @@ use egui::{Align, Layout, RichText};
 use crate::audio::{AudioEngine, resolver};
 use crate::auth::ResolvedAuth;
 use crate::config::{AuthConfig, AuthMode, Config};
+use crate::config::{KNOWN_BROWSERS, KNOWN_KEYRINGS, keyring_label};
 use crate::media;
 use crate::thumbs;
 use crate::ui;
@@ -542,6 +543,10 @@ pub struct App {
     last_prune: Instant,
     /// Whether the "Up next" queue panel is showing.
     show_queue: bool,
+    /// The sign-in *preference* from the config, as opposed to `auth`, which is
+    /// the source that actually resolved. Editing the resolved one would
+    /// silently turn "detect automatically" into a pinned browser.
+    auth_pref: AuthConfig,
     /// The "add to playlist" picker, when it is open.
     picker: Option<Picker>,
     /// A pending rename: (playlist id, name being edited).
@@ -688,6 +693,7 @@ impl App {
         // Playback is handled by yt-dlp reading the browser directly, so a
         // previously-discovered source lets it start immediately without
         // waiting for the (slower) InnerTube cookie extraction.
+        let auth_pref = cfg.auth.clone();
         let auth = crate::auth::cached_source().unwrap_or_else(|| cfg.auth.clone());
         let theme_light = cfg.ui.theme == "light";
         let mut app = Self {
@@ -697,6 +703,7 @@ impl App {
             rx,
             ytdlp,
             auth,
+            auth_pref,
             authenticated: false,
             deferred_play: None,
             deferred_since: None,
@@ -2045,38 +2052,14 @@ impl App {
         }
         self.last_thumb_scan = Instant::now();
 
-        let mut uris: Vec<String> = Vec::new();
-        {
-            let mut push = |slot: &Option<String>| {
-                if let Some(uri) = slot {
-                    uris.push(uri.clone());
-                }
-            };
-            for section in &self.sections {
-                for item in &section.items {
-                    push(&item.thumbnail);
-                }
-            }
-            if let View::Detail(page) = &self.view {
-                // The page's own header artwork. Album rows inherit it, which is
-                // why album pages looked fine without this — but a playlist's
-                // rows carry their own, so its cover was never fetched at all.
-                push(&page.thumbnail);
-                for track in &page.tracks {
-                    push(&track.thumbnail);
-                }
-                for shelf in &page.shelves {
-                    for item in &shelf.items {
-                        push(&item.thumbnail);
-                    }
-                }
-            }
-            if let Some(audio) = &self.audio
-                && let Some(track) = &audio.now_playing
-            {
-                push(&track.thumbnail);
-            }
-        }
+        // Only artwork that was actually drawn is worth fetching. Scanning the
+        // whole view instead meant a feed of fifteen shelves queued art for
+        // hundreds of items nobody had scrolled to — five times the requests,
+        // the decode work and the texture memory, for pictures off screen.
+        //
+        // Nothing needs seeding: an item with no texture still draws a
+        // placeholder, so it reports itself as visible and gets fetched.
+        let uris: Vec<String> = ui::take_visible_thumbnails(ctx).into_iter().collect();
 
         // Remember what this view needs so eviction never drops it.
         self.wanted_thumbs = uris.iter().cloned().collect();
@@ -2791,6 +2774,7 @@ impl App {
         }
         let mut open = true;
         let mut theme_changed = false;
+        let mut auth_changed = false;
         let mut refresh_auth = false;
         let mut clear_cache = false;
 
@@ -2829,10 +2813,63 @@ impl App {
                     .small(),
                 );
                 ui.label(
-                    RichText::new(format!("Source: {}", self.auth.browser))
+                    RichText::new(format!("In use: {}", self.auth.browser))
                         .weak()
                         .small(),
                 );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Read cookies").weak().small());
+                    if let Some(mode) = ui::pill_dropdown(
+                        ui,
+                        "auth_mode",
+                        self.auth_pref.mode,
+                        &AuthMode::ALL,
+                        |mode| mode.label(),
+                    ) {
+                        self.auth_pref.mode = mode;
+                        auth_changed = true;
+                    }
+                });
+                if self.auth_pref.mode == AuthMode::Browser {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Browser").weak().small());
+                        let current = KNOWN_BROWSERS
+                            .iter()
+                            .copied()
+                            .find(|browser| *browser == self.auth_pref.browser)
+                            .unwrap_or(KNOWN_BROWSERS[0]);
+                        if let Some(browser) = ui::pill_dropdown(
+                            ui,
+                            "auth_browser",
+                            current,
+                            &KNOWN_BROWSERS,
+                            |browser| browser,
+                        ) {
+                            self.auth_pref.browser = browser.to_string();
+                            auth_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Keyring").weak().small());
+                        let current = KNOWN_KEYRINGS
+                            .iter()
+                            .copied()
+                            .find(|keyring| *keyring == self.auth_pref.keyring)
+                            .unwrap_or("");
+                        if let Some(keyring) = ui::pill_dropdown(
+                            ui,
+                            "auth_keyring",
+                            current,
+                            &KNOWN_KEYRINGS,
+                            keyring_label,
+                        ) {
+                            self.auth_pref.keyring = keyring.to_string();
+                            auth_changed = true;
+                        }
+                    });
+                }
+                ui.add_space(4.0);
                 if ui
                     .button("Refresh sign-in")
                     .on_hover_text("Discard the cached cookies and extract them again")
@@ -2925,9 +2962,19 @@ impl App {
             self.theme_applied = false;
             self.save_ui_settings();
         }
+        if auth_changed {
+            // Write the preference before re-resolving: the resolver reads the
+            // config back rather than taking it from here.
+            let mut cfg = Config::load();
+            cfg.auth = self.auth_pref.clone();
+            if let Err(e) = cfg.save() {
+                self.status = Some(format!("Could not save the setting: {e}"));
+            }
+            refresh_auth = true;
+        }
         if refresh_auth {
             crate::auth::clear_cache();
-            self.status = Some("Refreshing sign-in…".to_string());
+            self.status = Some("Re-reading your sign-in…".to_string());
             spawn_auth(&self.rt, Config::load(), self.tx.clone(), ctx.clone(), true);
         }
         if clear_cache {

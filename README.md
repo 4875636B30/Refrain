@@ -20,8 +20,9 @@ A lightweight desktop client for YouTube Music, written in Rust.</p>
 Refrain plays your YouTube Music library without a browser engine. It talks to
 the same internal endpoints the web app uses, and streams audio through
 `yt-dlp`. No web view and no Electron: the window is up in about half a second
-(0.49 s measured), and the release build holds a steady ~215 MB resident with
-the home feed loaded — it does not creep as you browse.
+(0.49 s measured), and the release build holds a steady ~205 MB resident with
+the home feed loaded — it does not creep as you browse. Most of that is the GPU
+driver; artwork is fetched only for what is actually on screen.
 
 Sign in by reusing the session your browser already has — no separate login, no
 password to hand over.
@@ -144,6 +145,9 @@ Working today:
 - Light and dark themes, with Roboto bundled rather than assumed
 - An in-app settings window: theme, sign-in refresh, cache size and clearing
 - Feed shelves as sideways-scrolling carousels, as YouTube Music shows them
+- Artwork fetched only for items actually on screen (a feed asks for ~20 images
+  instead of ~200)
+- Sign-in configurable in-app: source, browser and keyring
 - A release bundle with `yt-dlp` shipped beside the binary
 
 Not built yet:
