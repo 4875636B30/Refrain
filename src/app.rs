@@ -3280,6 +3280,13 @@ impl App {
         let Some(step) = Demo::STEPS.get(demo.step).copied() else {
             return;
         };
+        // Keep frames coming while a demo runs. The UI sleeps when nothing asks
+        // for a repaint, and a sleeping UI never ticks the demo: the first
+        // recording sat on the search results for sixteen seconds because the
+        // step that opens an album was only reached when something else
+        // happened to wake the app. Slow enough not to spin — a demo wants a
+        // few frames a second, not a busy loop.
+        ctx.request_repaint_after(Duration::from_millis(100));
         let waited = demo.step_started.elapsed();
         if waited < Demo::STEP_GAP {
             return;
