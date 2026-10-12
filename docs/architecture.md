@@ -159,6 +159,28 @@ subsequent launches.
 When several browsers are present, `auto` picks the first one that actually has a
 **YouTube session**, so a logged-out Firefox won't shadow a signed-in Brave.
 
+## Playlist editing
+
+Adding to a playlist, creating, renaming, deleting and removing tracks all go
+through InnerTube's `browse/edit_playlist` (plus `playlist/create` and
+`playlist/delete`). Two details cost real debugging:
+
+- **Ids.** Playlists arrive as browse ids (`VLPL…`) but those endpoints want the
+  bare id (`PL…`), and sending the wrong one is a *silent no-op*. The prefix is
+  stripped in one place, with tests.
+- **Removing needs the entry id, not the video id.** The same track can appear in
+  a playlist more than once, so entries have their own id — the row's
+  `playlistItemData.playlistSetVideoId` — and `ACTION_REMOVE_VIDEO` is rejected
+  with a bare 400 without it. `Track` carries it as `set_video_id`.
+
+Which playlists offer the destructive action is decided by whether the header's
+facepile links to a `MUSIC_PAGE_TYPE_USER_CHANNEL`: editorial playlists have no
+linked owner. That distinguishes *a person's* playlist from YouTube Music's, but
+not *your* playlist from someone else's — a Google account can control several
+channels and the playlist's owner need not be the account's active one, so
+comparing against the signed-in channel does not work. The server stays the real
+authority; a refusal is shown rather than swallowed.
+
 ## Typography
 
 Roboto is bundled (`assets/fonts/`, Apache-2.0) rather than taken from the

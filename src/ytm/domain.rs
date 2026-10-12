@@ -31,6 +31,11 @@ pub struct Track {
     pub artist_ids: Vec<String>,
     pub album: Option<String>,
     pub duration_secs: Option<u32>,
+    /// The id of this track's *entry* in the playlist it came from, when it came
+    /// from one. YouTube Music identifies entries this way rather than by video
+    /// id, because the same track can appear in a playlist more than once —
+    /// removing it needs this, not the video id.
+    pub set_video_id: Option<String>,
     pub thumbnail: Option<String>,
 }
 
@@ -99,10 +104,10 @@ pub struct Page {
     pub track_count: Option<usize>,
     /// Raw playlist id, for paging long track lists via the player panel.
     pub playlist_id: Option<String>,
-    /// Whether the signed-in user may edit this playlist. YouTube Music marks
-    /// that by using an editable header renderer instead of a plain one, so a
-    /// missing marker reads as "not editable" — the safe direction.
-    pub editable: bool,
+    /// Whether a person, rather than YouTube Music itself, is credited as this
+    /// playlist's owner. A missing marker reads as "editorial" — the safe
+    /// direction, since it only hides the destructive action.
+    pub owner_is_user: bool,
 }
 
 impl Page {
@@ -181,6 +186,8 @@ impl SearchItem {
                 .collect(),
             album: None,
             duration_secs: self.duration_secs,
+            // Search results are not playlist entries.
+            set_video_id: None,
             thumbnail: self.thumbnail.clone(),
         })
     }

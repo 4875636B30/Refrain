@@ -29,7 +29,7 @@ password to hand over.
 | **Search** | Songs, videos, albums, artists and playlists, grouped into categories with "See more" to expand one. |
 | **Browse** | Home and Library feeds, album / artist / playlist pages, cover-art grids, carousels and "quick picks". |
 | **Playback** | Streams through `yt-dlp` and caches to disk, so replays are instant. Seek, volume, shuffle, repeat, auto-advance. |
-| **Your library** | Thumbs up and down, playlists you can add to, and an "Up next" queue. |
+| **Your library** | Thumbs up and down, playlists you can add to, rename, delete or remove tracks from, and an "Up next" queue. |
 | **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
 | **Themes** | Light and dark, persisted in the config. Roboto is bundled, so it looks the same on every desktop. |
 | **Keyboard** | Space, arrows, `Shift`+arrows, `/` and `Esc` — see [shortcuts](#keyboard-shortcuts). |
@@ -129,7 +129,7 @@ Working today:
 - Home and Library feeds, with shelves paged in via continuations
 - Album, artist and playlist pages, with artwork and carousels
 - Streaming playback with on-disk write-through, prefetching and a download fallback
-- Thumbs up / down, playlists you can add to, shuffle, repeat, "Up next" queue
+- Thumbs up / down, playlist editing, shuffle, repeat, "Up next" queue
 - MPRIS media controls, media keys and `playerctl`
 - Light and dark themes, with Roboto bundled rather than assumed
 - Feed shelves as sideways-scrolling carousels, as YouTube Music shows them
@@ -137,9 +137,6 @@ Working today:
 
 Not built yet:
 
-- Renaming, deleting and removing tracks from playlists. The API is in place,
-  but the app can't yet tell which playlists you own, and offering "Delete
-  playlist" on a guess isn't worth it.
 - An in-app settings panel — edit `config.toml` for now
 - Packaging beyond the tarball (no Flatpak, AUR or `.deb` yet)
 

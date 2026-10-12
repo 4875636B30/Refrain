@@ -360,6 +360,8 @@ pub struct RowOutcome {
     pub link: Option<String>,
     /// "Add to playlist" was chosen from the row's context menu.
     pub add_to_playlist: bool,
+    /// "Remove from this playlist" was chosen from the row's context menu.
+    pub remove_from_playlist: bool,
 }
 
 /// YouTube Music marks the playing row with a small equaliser where the track
@@ -407,6 +409,8 @@ pub fn list_row(
     selected: bool,
     // `active` is playback actually running, which animates the marker.
     active: bool,
+    // `can_remove` offers "remove from this playlist" in the context menu.
+    can_remove: bool,
     playable: bool,
     navigable: bool,
 ) -> RowOutcome {
@@ -498,9 +502,14 @@ pub fn list_row(
     // Right-click menu. Kept to what the app can actually do: a menu that
     // offers things which do nothing is worse than no menu.
     let mut add_to_playlist = false;
+    let mut remove_from_playlist = false;
     response.context_menu(|ui| {
         if ui.button("Add to playlist…").clicked() {
             add_to_playlist = true;
+            ui.close();
+        }
+        if can_remove && ui.button("Remove from this playlist").clicked() {
+            remove_from_playlist = true;
             ui.close();
         }
     });
@@ -510,6 +519,7 @@ pub fn list_row(
         hovered,
         link,
         add_to_playlist,
+        remove_from_playlist,
     }
 }
 

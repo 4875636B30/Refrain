@@ -338,8 +338,17 @@ pub fn parse_track(item: &Value) -> Option<Track> {
         artist_ids: artist_ids_from_runs(&subtitle_runs),
         album: album_from_runs(&subtitle_runs),
         duration_secs: duration_from(item, &cols),
+        set_video_id: set_video_id_of(item),
         thumbnail: thumbnail_for(item, THUMBNAIL_TARGET),
     })
+}
+
+/// The id of a track's entry within the playlist it was listed in.
+fn set_video_id_of(item: &Value) -> Option<String> {
+    find_first(item, "playlistItemData")
+        .and_then(|data| data.get("playlistSetVideoId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn kind_from_page_type(page_type: Option<&str>) -> Option<ItemKind> {
@@ -629,6 +638,8 @@ pub fn parse_panel_tracks(v: &Value) -> Vec<Track> {
                     .get("lengthText")
                     .map(text)
                     .and_then(|length| parse_duration(&length)),
+                // Panel entries belong to the player queue, not a playlist.
+                set_video_id: None,
                 thumbnail: thumbnail_for(item, THUMBNAIL_TARGET),
             })
         })
@@ -721,7 +732,7 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
         continuation,
         track_count,
         playlist_id,
-        editable: is_editable(v),
+        owner_is_user: owner_is_user(v),
     }
 }
 
@@ -747,9 +758,22 @@ pub fn parse_like_status(v: &Value) -> (LikeStatus, bool) {
     (status, allowed)
 }
 
-/// Whether a page's header marks it as editable by the current user.
-pub fn is_editable(v: &Value) -> bool {
-    find_first(v, "musicEditablePlaylistDetailHeaderRenderer").is_some()
+/// Whether a playlist's header credits a *user* as its owner.
+///
+/// Editorial playlists (YouTube Music's own) have a facepile with no linked
+/// channel; a playlist owned by a person links to a `MUSIC_PAGE_TYPE_USER_CHANNEL`.
+/// Note this says "owned by a user", not "owned by *this* user": a Google
+/// account can control several channels, and the playlist's owner need not be
+/// the account's active one, so comparing against the signed-in channel does not
+/// work. It is used only to keep the destructive action off editorial playlists,
+/// with the server remaining the real authority.
+pub fn owner_is_user(v: &Value) -> bool {
+    find_first(v, "avatarStackViewModel")
+        .and_then(|facepile| find_first(facepile, "browseEndpoint"))
+        .and_then(|endpoint| endpoint.get("browseEndpointContextSupportedConfigs"))
+        .and_then(|configs| find_first(configs, "pageType"))
+        .and_then(Value::as_str)
+        .is_some_and(|page_type| page_type == "MUSIC_PAGE_TYPE_USER_CHANNEL")
 }
 
 #[cfg(test)]

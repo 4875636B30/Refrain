@@ -247,6 +247,47 @@ impl Client {
         .await
     }
 
+    /// Remove a track from a playlist.
+    ///
+    /// Needs the entry's own id as well as the video id: the same track can sit
+    /// in a playlist twice, and the server rejects the action without knowing
+    /// which entry is meant.
+    pub async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        set_video_id: &str,
+    ) -> Result<()> {
+        self.edit_playlist(
+            playlist_id,
+            json!([{
+                "action": "ACTION_REMOVE_VIDEO",
+                "removedVideoId": video_id,
+                "setVideoId": set_video_id,
+            }]),
+        )
+        .await
+    }
+
+    /// Rename a playlist.
+    pub async fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<()> {
+        self.edit_playlist(
+            playlist_id,
+            json!([{ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title }]),
+        )
+        .await
+    }
+
+    /// Delete a playlist outright. The server refuses unless you own it.
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        self.post(
+            "playlist/delete",
+            json!({ "playlistId": bare_playlist_id(playlist_id) }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Apply edits to a playlist. Every mutation goes through here.
     async fn edit_playlist(&self, playlist_id: &str, actions: Value) -> Result<()> {
         self.post(

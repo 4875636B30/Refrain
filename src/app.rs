@@ -62,6 +62,11 @@ enum Msg {
     Playlists(Result<Vec<(String, String)>, String>),
     /// A playlist edit finished; the string is what to tell the user.
     PlaylistEdited(Result<String, String>),
+    /// A playlist was deleted. Its page has to go away if it is open.
+    DeletedPlaylist {
+        playlist_id: String,
+        result: Result<String, String>,
+    },
     /// The rating for a track, read from the watch-next response.
     LikeStatus {
         video_id: String,
@@ -142,6 +147,24 @@ enum Action {
     /// Open the "add to playlist" picker for a track.
     AddToPlaylist {
         video_id: String,
+        title: String,
+    },
+    /// Take a track out of the playlist being viewed.
+    RemoveFromPlaylist {
+        playlist_id: String,
+        video_id: String,
+        /// The entry's id within the playlist; without it the server refuses.
+        set_video_id: Option<String>,
+        title: String,
+    },
+    /// Open the rename dialog for a playlist.
+    RenamePlaylist {
+        playlist_id: String,
+        title: String,
+    },
+    /// Ask before deleting a playlist.
+    DeletePlaylist {
+        playlist_id: String,
         title: String,
     },
 }
@@ -440,6 +463,10 @@ pub struct App {
     show_queue: bool,
     /// The "add to playlist" picker, when it is open.
     picker: Option<Picker>,
+    /// A pending rename: (playlist id, name being edited).
+    renaming: Option<(String, String)>,
+    /// A pending delete: (playlist id, title), waiting for confirmation.
+    deleting: Option<(String, String)>,
     /// Desktop media controls, if the desktop has any.
     media: media::Controls,
     /// The track the desktop is currently showing.
@@ -631,6 +658,8 @@ impl App {
             last_prune: Instant::now(),
             show_queue: false,
             picker: None,
+            renaming: None,
+            deleting: None,
             media,
             media_for: None,
             last_media_push: Instant::now(),
@@ -1197,6 +1226,37 @@ impl App {
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::AddToPlaylist { video_id, title } => self.open_picker(ctx, video_id, title),
+            Action::RemoveFromPlaylist {
+                playlist_id,
+                video_id,
+                set_video_id,
+                title,
+            } => {
+                // Without the entry id the server rejects the removal, so this
+                // only runs where the row actually carried one.
+                if let Some(set_video_id) = set_video_id
+                    && self.authenticated
+                {
+                    let client = self.client.clone();
+                    let tx = self.tx.clone();
+                    let ctx = ctx.clone();
+                    self.rt.spawn(async move {
+                        let result = client
+                            .remove_from_playlist(&playlist_id, &video_id, &set_video_id)
+                            .await
+                            .map(|()| format!("Removed “{title}” from the playlist"))
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(Msg::PlaylistEdited(result));
+                        ctx.request_repaint();
+                    });
+                }
+            }
+            Action::RenamePlaylist { playlist_id, title } => {
+                self.renaming = Some((playlist_id, title));
+            }
+            Action::DeletePlaylist { playlist_id, title } => {
+                self.deleting = Some((playlist_id, title));
+            }
             Action::Open(id) => self.open_page(ctx, id),
             Action::PlayQueueIndex(idx) => self.play_index(ctx, idx),
             Action::PlayList { tracks, index } => {
@@ -1589,6 +1649,26 @@ impl App {
                         }
                     }
                 }
+                Msg::DeletedPlaylist {
+                    playlist_id,
+                    result,
+                } => match result {
+                    Ok(message) => {
+                        self.status = Some(message);
+                        // Leaving the page open would show a playlist that no
+                        // longer exists, and reloading it would just fail.
+                        let showing = matches!(
+                            &self.view,
+                            View::Detail(page)
+                                if page.playlist_id.as_deref() == Some(playlist_id.as_str())
+                        );
+                        if showing {
+                            self.nav = Nav::Library;
+                            self.load_page(ctx, "FEmusic_library_landing".to_string(), true);
+                        }
+                    }
+                    Err(e) => self.status = Some(format!("Could not delete the playlist: {e}")),
+                },
                 Msg::PlaylistEdited(result) => match result {
                     Ok(message) => {
                         // Done with the dialog; say what happened in the status
@@ -2227,6 +2307,7 @@ impl App {
                 Some(idx),
                 selected,
                 active,
+                false,
                 item.playable(),
                 item.navigable(),
             );
@@ -2259,6 +2340,32 @@ impl App {
     ) {
         detail_header(ui, page, &self.thumbnails);
 
+        // Editing is offered for playlists a person owns. Editorial ones are
+        // excluded, but the server remains the authority: a playlist owned by
+        // someone else will simply refuse, with the reason shown.
+        let playlist_id = if page.owner_is_user {
+            page.playlist_id.clone()
+        } else {
+            None
+        };
+        if let Some(id) = &playlist_id {
+            ui.horizontal(|ui| {
+                if ui.button("Rename").clicked() {
+                    *action = Some(Action::RenamePlaylist {
+                        playlist_id: id.clone(),
+                        title: page.title.clone(),
+                    });
+                }
+                if ui.button("Delete").clicked() {
+                    *action = Some(Action::DeletePlaylist {
+                        playlist_id: id.clone(),
+                        title: page.title.clone(),
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
+
         let active = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
         for (idx, track) in page.tracks.iter().enumerate() {
             let selected = self.current == Some(idx)
@@ -2282,6 +2389,7 @@ impl App {
                 Some(idx),
                 selected,
                 active,
+                playlist_id.is_some(),
                 true,
                 false,
             );
@@ -2290,6 +2398,15 @@ impl App {
                     video_id: track.video_id.clone(),
                     title: track.title.clone(),
                 });
+            } else if row.remove_from_playlist {
+                if let Some(id) = &playlist_id {
+                    *action = Some(Action::RemoveFromPlaylist {
+                        playlist_id: id.clone(),
+                        video_id: track.video_id.clone(),
+                        set_video_id: track.set_video_id.clone(),
+                        title: track.title.clone(),
+                    });
+                }
             } else if let Some(id) = row.link {
                 *action = Some(Action::Open(id));
             } else if row.hovered {
@@ -2415,6 +2532,113 @@ impl App {
             let _ = tx.send(Msg::PlaylistEdited(result));
             ctx.request_repaint();
         });
+    }
+
+    fn spawn_rename(&mut self, ctx: &egui::Context, playlist_id: String, title: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .rename_playlist(&playlist_id, &title)
+                .await
+                .map(|()| format!("Renamed to “{title}”"))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::PlaylistEdited(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_delete(&mut self, ctx: &egui::Context, playlist_id: String, title: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .delete_playlist(&playlist_id)
+                .await
+                .map(|()| format!("Deleted “{title}”"))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::DeletedPlaylist {
+                playlist_id,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// The rename dialog and the delete confirmation.
+    fn playlist_dialogs(&mut self, ctx: &egui::Context) {
+        if let Some((playlist_id, mut name)) = self.renaming.take() {
+            let mut window_open = true;
+            let mut cancelled = false;
+            let mut save = false;
+            egui::Window::new("Rename playlist")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut window_open)
+                .show(ctx, |ui| {
+                    ui.set_min_width(300.0);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .hint_text("Playlist name")
+                            .desired_width(280.0),
+                    );
+                    // Enter saves, which is what anyone typing expects.
+                    save = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            save = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if save && !name.trim().is_empty() {
+                self.spawn_rename(ctx, playlist_id, name.trim().to_string());
+            } else if window_open && !cancelled {
+                self.renaming = Some((playlist_id, name));
+            }
+        }
+
+        if let Some((playlist_id, title)) = self.deleting.take() {
+            let mut window_open = true;
+            let mut cancelled = false;
+            let mut confirmed = false;
+            egui::Window::new("Delete playlist")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut window_open)
+                .show(ctx, |ui| {
+                    ui.set_min_width(320.0);
+                    ui.label(format!("Delete “{title}”?"));
+                    ui.label(
+                        RichText::new(
+                            "This deletes the playlist, not the music in it. It can't be undone.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            cancelled = true;
+                        }
+                        if ui.button("Delete").clicked() {
+                            confirmed = true;
+                        }
+                    });
+                });
+            if confirmed {
+                self.spawn_delete(ctx, playlist_id, title);
+            } else if window_open && !cancelled {
+                self.deleting = Some((playlist_id, title));
+            }
+        }
     }
 
     /// Draw the picker, if it is open.
@@ -2607,6 +2831,7 @@ impl App {
                         Some(idx),
                         selected,
                         active,
+                        false,
                         true,
                         false,
                     );
@@ -2901,6 +3126,7 @@ impl eframe::App for App {
         self.tick_like_status(&ctx);
         self.tick_media();
         self.playlist_picker(&ctx);
+        self.playlist_dialogs(&ctx);
         self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);

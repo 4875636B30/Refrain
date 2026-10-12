@@ -413,7 +413,7 @@ fn page_cmd(browse_id: &str) -> anyhow::Result<()> {
     println!("tracks: {}", page.tracks.len());
     println!("track count (header): {:?}", page.track_count);
     println!("has more tracks: {}", page.has_more_tracks());
-    println!("editable: {}", page.editable);
+    println!("owner is a user: {}", page.owner_is_user);
     for t in page.tracks.iter().take(3) {
         println!("   - {} — {}", t.title, t.artist_line());
     }
