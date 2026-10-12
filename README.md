@@ -8,6 +8,7 @@
 A lightweight desktop client for YouTube Music, written in Rust.</p>
 
 <p align="center">
+  <a href="https://github.com/4875636B30/Refrain/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/4875636B30/Refrain/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2b2b2b?style=flat-square"></a>
   <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-000000?style=flat-square&logo=rust&logoColor=white">
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux_x86_64-ff0000?style=flat-square">
@@ -62,7 +63,7 @@ couldn't use.
 ### From source
 
 ```sh
-git clone https://github.com/OWNER/refrain
+git clone https://github.com/4875636B30/Refrain.git
 cd refrain
 cargo run --release
 ```

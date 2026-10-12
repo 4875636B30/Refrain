@@ -2,18 +2,19 @@
 <!--
   AppStream metadata, so software centres can describe and install the app.
 
-  NOTE: the id and homepage below are placeholders. Replace `example` with the
-  GitHub account the project is published under, in both places, before
-  releasing — the id must be reverse-DNS for the project's real home.
+  The id is reverse-DNS for the project's real home; it has to change with it,
+  since it is what software centres key on.
 -->
 <component type="desktop-application">
-  <id>io.github.example.Refrain</id>
+  <id>io.github.4875636B30.Refrain</id>
 
   <name>Refrain</name>
   <summary>Fast, low-memory client for YouTube Music</summary>
 
-  <developer id="io.github.example">
-    <name>example</name>
+  <!-- AppStream requires a developer id in lowercase, unlike the component
+       id above, which conventionally keeps the project's capitalisation. -->
+  <developer id="io.github.4875636b30">
+    <name>_4875636B30</name>
   </developer>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -38,8 +39,8 @@
 
   <launchable type="desktop-id">refrain.desktop</launchable>
 
-  <url type="homepage">https://github.com/example/refrain</url>
-  <url type="bugtracker">https://github.com/example/refrain/issues</url>
+  <url type="homepage">https://github.com/4875636B30/Refrain</url>
+  <url type="bugtracker">https://github.com/4875636B30/Refrain/issues</url>
 
   <categories>
     <category>AudioVideo</category>
