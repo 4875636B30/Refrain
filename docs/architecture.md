@@ -3,6 +3,19 @@
 Notes on the design, and on the parts that turned out to be less obvious than
 they looked. The [README](../README.md) covers installing and using it.
 
+## Locale
+
+InnerTube takes the language and region as `hl`/`gl`, which are taken from the
+POSIX locale environment. Both are *validated* rather than passed through:
+`LANG=C` — a minimal container, a CI runner, a script that sets `LC_ALL=C` —
+parses to a "language" of `C`, and YouTube answers `hl=C` with HTTP 400
+"Request contains an invalid argument", which breaks search and browsing
+entirely. `C` and `POSIX` are exactly the locales with no language code to send,
+so anything that is not two or three letters falls back to `en`/`US`.
+
+The daily canary found this, in CI, on the first tagged release — which is
+precisely the kind of environment-dependent breakage it exists for.
+
 ## Talking to YouTube Music
 
 YouTube Music has no public API. Like other third-party clients, Refrain talks to

@@ -28,6 +28,34 @@ fn migrate_legacy_dirs() {
     });
 }
 
+/// Split a POSIX locale string into InnerTube's `hl` and `gl`.
+///
+/// Both are validated, because passing a non-language straight through is not a
+/// harmless degradation: `LANG=C` yields `hl=C`, and YouTube answers that with
+/// HTTP 400 "Request contains an invalid argument" — which breaks search and
+/// browsing completely for anyone running in a minimal environment. `C` and
+/// `POSIX` are exactly the locales that have no language code to send.
+fn parse_locale(raw: &str) -> (String, String) {
+    let mut parts = raw.split(['_', '.', '@']);
+    let language = parts.next().unwrap_or("").trim();
+    let region = parts.next().unwrap_or("").trim();
+
+    // ISO 639-1 is two letters, and a few languages use three (`fil`).
+    let language =
+        if (2..=3).contains(&language.len()) && language.chars().all(|c| c.is_ascii_alphabetic()) {
+            language.to_lowercase()
+        } else {
+            "en".to_string()
+        };
+    // ISO 3166-1 alpha-2.
+    let region = if region.len() == 2 && region.chars().all(|c| c.is_ascii_alphabetic()) {
+        region.to_uppercase()
+    } else {
+        "US".to_string()
+    };
+    (language, region)
+}
+
 fn config_dir_raw() -> PathBuf {
     project_dirs()
         .map(|d| d.config_dir().to_path_buf())
@@ -58,22 +86,7 @@ impl Config {
             .or_else(|_| std::env::var("LC_MESSAGES"))
             .or_else(|_| std::env::var("LANG"))
             .unwrap_or_default();
-
-        let mut parts = raw.split(['_', '.', '@']);
-        let language = parts.next().unwrap_or("").trim();
-        let region = parts.next().unwrap_or("").trim();
-
-        let language = if language.is_empty() {
-            "en".to_string()
-        } else {
-            language.to_string()
-        };
-        let region = if region.len() == 2 {
-            region.to_uppercase()
-        } else {
-            "US".to_string()
-        };
-        (language, region)
+        parse_locale(&raw)
     }
 }
 
@@ -218,5 +231,49 @@ impl Default for UiConfig {
             volume: 0.8,
             theme: "dark".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::parse_locale;
+
+    fn locale(raw: &str) -> (String, String) {
+        let (language, region) = parse_locale(raw);
+        (language, region)
+    }
+
+    #[test]
+    fn reads_a_normal_locale() {
+        assert_eq!(locale("en_US.UTF-8"), ("en".into(), "US".into()));
+        assert_eq!(locale("de_AT.UTF-8"), ("de".into(), "AT".into()));
+        assert_eq!(locale("pt_BR"), ("pt".into(), "BR".into()));
+        // Three-letter languages exist and should survive.
+        assert_eq!(locale("fil_PH"), ("fil".into(), "PH".into()));
+        // A language on its own has no region.
+        assert_eq!(locale("en"), ("en".into(), "US".into()));
+        assert_eq!(locale("en_US@currency=EUR"), ("en".into(), "US".into()));
+    }
+
+    /// `C` and `POSIX` have no language code, and sending them as `hl` makes
+    /// YouTube reject every request with HTTP 400 — so they must not be passed
+    /// through. This is what a canary run in CI caught.
+    #[test]
+    fn locale_without_a_language_falls_back_to_english() {
+        for raw in ["C", "C.UTF-8", "POSIX", "", "  ", "123_45", "_US"] {
+            assert_eq!(
+                locale(raw),
+                ("en".into(), "US".into()),
+                "{raw:?} should fall back"
+            );
+        }
+    }
+
+    /// A region that is not two letters is not a region.
+    #[test]
+    fn odd_regions_fall_back_to_us() {
+        assert_eq!(locale("en_USA"), ("en".into(), "US".into()));
+        assert_eq!(locale("en_1"), ("en".into(), "US".into()));
+        assert_eq!(locale("en_us"), ("en".into(), "US".into()));
     }
 }
