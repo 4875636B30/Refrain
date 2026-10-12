@@ -575,6 +575,26 @@ fn first_continuation(v: &Value) -> Option<String> {
 ///
 /// Continuation *responses* use `sectionListContinuation` where the first
 /// response uses `sectionListRenderer`, so accept either.
+/// A token for fetching the *next* page, wherever it sits in a response.
+///
+/// Deliberately ignores `reloadContinuationData`, which looks like a paging
+/// token but is not: sending one back returns an empty page. A grouped "All"
+/// search offers only that kind — its results are already complete — while a
+/// single-category search offers a real `nextContinuationData` token worth 20
+/// more rows, which is why "load more" appears in the expanded view only.
+pub fn parse_any_continuation(v: &Value) -> Option<String> {
+    if let Some(token) = find_first(v, "continuationCommand")
+        .and_then(|command| command.get("token"))
+        .and_then(Value::as_str)
+    {
+        return Some(token.to_string());
+    }
+    find_first(v, "nextContinuationData")
+        .and_then(|data| data.get("continuation"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 pub fn parse_continuation(v: &Value) -> Option<String> {
     for name in ["sectionListContinuation", "sectionListRenderer"] {
         for node in find_renderers(v, name) {

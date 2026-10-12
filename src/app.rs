@@ -26,7 +26,7 @@ use crate::ytm::domain::LikeStatus;
 use crate::ytm::{Client, ItemKind, Page, SearchFilter, SearchItem, Track};
 
 enum Msg {
-    Search(Result<Vec<SearchSection>, String>),
+    Search(Result<SearchResults, String>),
     Page(Result<Page, String>),
     Downloaded {
         video_id: String,
@@ -62,6 +62,8 @@ enum Msg {
     Playlists(Result<Vec<(String, String)>, String>),
     /// A playlist edit finished; the string is what to tell the user.
     PlaylistEdited(Result<String, String>),
+    /// Further search results, appended to the current ones.
+    MoreResults(Result<(Vec<SearchItem>, Option<String>), String>),
     /// A playlist was deleted. Its page has to go away if it is open.
     DeletedPlaylist {
         playlist_id: String,
@@ -379,24 +381,16 @@ fn kind_for_filter(filter: SearchFilter) -> Option<ItemKind> {
 ///
 /// Grouping the "All" response preserves YouTube's own relevance order, which is
 /// noticeably better than asking for each category separately.
-async fn search_sections(
-    client: &Client,
-    query: &str,
-    filter: SearchFilter,
-) -> Result<Vec<SearchSection>, String> {
-    if filter != SearchFilter::All {
-        let items = client
-            .search(query, filter)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(vec![SearchSection { filter, items }]);
-    }
+/// A search response: grouped for display, the raw list, and the next page.
+struct SearchResults {
+    sections: Vec<SearchSection>,
+    /// Kept so more results can be folded into the grouping.
+    items: Vec<SearchItem>,
+    more: Option<String>,
+}
 
-    let items = client
-        .search(query, SearchFilter::All)
-        .await
-        .map_err(|e| e.to_string())?;
-
+/// Group a flat search response into the categories the UI shows.
+fn group_items(items: &[SearchItem]) -> Vec<SearchSection> {
     let mut sections = Vec::new();
     for category in [
         SearchFilter::Songs,
@@ -420,7 +414,35 @@ async fn search_sections(
             });
         }
     }
-    Ok(sections)
+    sections
+}
+
+async fn search_sections(
+    client: &Client,
+    query: &str,
+    filter: SearchFilter,
+) -> Result<SearchResults, String> {
+    let (items, more) = client
+        .search(query, filter)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // One request when a single category is asked for; the "All" view groups a
+    // single response client-side, which measured better than per-category
+    // requests.
+    let sections = if filter == SearchFilter::All {
+        group_items(&items)
+    } else {
+        vec![SearchSection {
+            filter,
+            items: items.clone(),
+        }]
+    };
+    Ok(SearchResults {
+        sections,
+        items,
+        more,
+    })
 }
 
 /// Turn a clicked result/shelf item into an action.
@@ -519,6 +541,11 @@ pub struct App {
     renaming: Option<(String, String)>,
     /// A pending delete: (playlist id, title), waiting for confirmation.
     deleting: Option<(String, String)>,
+    /// The flat result list and the token for the next page, so "load more"
+    /// can fold new results into the same grouping.
+    search_items: Vec<SearchItem>,
+    search_more: Option<String>,
+    want_more_results: bool,
     /// Whether the settings window is showing, and what the cache holds.
     show_settings: bool,
     cache_usage: (usize, u64),
@@ -682,6 +709,9 @@ impl App {
             picker: None,
             renaming: None,
             deleting: None,
+            search_items: Vec::new(),
+            search_more: None,
+            want_more_results: false,
             show_settings: false,
             cache_usage: (0, 0),
             media,
@@ -726,6 +756,22 @@ impl App {
 
     // ---------------------------------------------------------------- actions
 
+    /// Fetch the next page of the current search.
+    fn spawn_more_results(&mut self, ctx: &egui::Context) {
+        let Some(token) = self.search_more.clone() else {
+            return;
+        };
+        self.status = Some("Loading more results…".to_string());
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client.search_more(&token).await.map_err(|e| e.to_string());
+            let _ = tx.send(Msg::MoreResults(result));
+            ctx.request_repaint();
+        });
+    }
+
     fn run_search(&mut self, ctx: &egui::Context) {
         let query = self.query.trim().to_string();
         if query.is_empty() {
@@ -742,6 +788,8 @@ impl App {
             self.prev_sections = None;
         }
         self.last_search = Some((query.clone(), self.filter));
+        self.search_items.clear();
+        self.search_more = None;
         let client = self.client.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -1390,8 +1438,24 @@ impl App {
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Search(Ok(sections)) => {
-                    self.sections = sections;
+                Msg::MoreResults(result) => match result {
+                    Ok((items, more)) => {
+                        // An empty page means there was nothing left to add;
+                        // say so rather than appearing to ignore the click.
+                        self.status = items
+                            .is_empty()
+                            .then(|| "No more results for this search".to_string());
+                        self.search_items.extend(items);
+                        self.sections = group_items(&self.search_items);
+                        self.search_more = more;
+                    }
+                    Err(e) => self.status = Some(format!("Could not load more results: {e}")),
+                },
+                Msg::Search(Ok(results)) => {
+                    self.sections = results.sections;
+                    self.search_items = results.items;
+
+                    self.search_more = results.more;
                     self.busy = false;
                     self.status = None;
                     self.view = View::Search;
@@ -2253,6 +2317,9 @@ impl App {
             }
         }
         self.hover_prefetch(ctx, hovered);
+        if std::mem::take(&mut self.want_more_results) {
+            self.spawn_more_results(ctx);
+        }
         if let Some(action) = action {
             self.handle_action(ctx, action);
         }
@@ -2274,6 +2341,10 @@ impl App {
         // A chosen category shows everything it returned; "All" previews each.
         let expanded = self.filter != SearchFilter::All;
         const PREVIEW: usize = 6;
+
+        // Only the expanded view can page: a grouped "All" search comes back
+        // complete, and its only token is a reload one that yields nothing.
+        let more_available = self.search_more.is_some() && expanded;
 
         // Taken out so rendering can borrow `self` mutably.
         let sections = std::mem::take(&mut self.sections);
@@ -2320,6 +2391,20 @@ impl App {
             }
         }
         self.sections = sections;
+
+        if more_available {
+            ui.add_space(18.0);
+            ui.vertical_centered(|ui| {
+                if ui
+                    .button("Load more results")
+                    .on_hover_text("Fetch the next page from YouTube Music")
+                    .clicked()
+                {
+                    self.want_more_results = true;
+                }
+            });
+            ui.add_space(12.0);
+        }
     }
 
     /// Rows for a list of songs/videos: hover warms a stream, clicking plays

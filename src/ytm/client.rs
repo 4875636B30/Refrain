@@ -311,13 +311,34 @@ impl Client {
     }
 
     /// Search the catalogue. Results are de-duplicated and classified.
-    pub async fn search(&self, query: &str, filter: SearchFilter) -> Result<Vec<SearchItem>> {
+    ///
+    /// Returns the token for fetching more, when the response offers one —
+    /// search is paged the same way feeds are.
+    pub async fn search(
+        &self,
+        query: &str,
+        filter: SearchFilter,
+    ) -> Result<(Vec<SearchItem>, Option<String>)> {
         let mut body = json!({ "query": query });
         if let Some(params) = filter.param() {
             body["params"] = Value::String(params.to_string());
         }
         let value = self.post("search", body).await?;
-        Ok(extract::parse_search_items(&value))
+        Ok((
+            extract::parse_search_items(&value),
+            extract::parse_any_continuation(&value),
+        ))
+    }
+
+    /// Fetch the next page of a search.
+    pub async fn search_more(&self, token: &str) -> Result<(Vec<SearchItem>, Option<String>)> {
+        let value = self
+            .post("search", json!({ "continuation": token }))
+            .await?;
+        Ok((
+            extract::parse_search_items(&value),
+            extract::parse_any_continuation(&value),
+        ))
     }
 
     /// Load a detail page by browse id (`MPREb…` album, `VL…` playlist, `UC…` artist).

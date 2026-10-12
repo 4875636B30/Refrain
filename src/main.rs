@@ -237,7 +237,7 @@ fn search_cmd(query: &str) -> anyhow::Result<()> {
         .map(|r| r.jar);
     let client = ytm::Client::new(&lang, &country, jar)?;
 
-    let items = rt.block_on(client.search(query, SearchFilter::All))?;
+    let items = rt.block_on(client.search(query, SearchFilter::All))?.0;
     println!("{} items (All filter)", items.len());
     for (i, item) in items.iter().enumerate() {
         println!(
@@ -567,7 +567,7 @@ fn probe(query: &str) -> anyhow::Result<()> {
     let client = Client::new(&lang, &country, jar)?;
 
     println!("== search({query:?}) [Songs] ==");
-    let songs = rt.block_on(client.search(query, SearchFilter::Songs))?;
+    let songs = rt.block_on(client.search(query, SearchFilter::Songs))?.0;
     for item in songs.iter().take(5) {
         let dur = item
             .duration_secs
@@ -577,7 +577,7 @@ fn probe(query: &str) -> anyhow::Result<()> {
     }
 
     println!("== search({query:?}) [Albums] ==");
-    let albums = rt.block_on(client.search(query, SearchFilter::Albums))?;
+    let albums = rt.block_on(client.search(query, SearchFilter::Albums))?.0;
     for item in albums.iter().take(3) {
         println!("  {}  |  {}", item.title, item.subtitle);
     }

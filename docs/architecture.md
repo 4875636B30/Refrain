@@ -36,6 +36,21 @@ the parser walks the tree looking for renderer names it recognises
 (`musicResponsiveListItemRenderer`, `musicResponsiveHeaderRenderer`, …). Unknown
 wrappers are simply skipped, so the client keeps working when the layout shifts.
 
+### Paging
+
+Feeds, long playlists and expanded search categories all page, but not
+identically, and one of them looks like it pages when it does not:
+
+- **Feeds and long playlists** use `nextContinuationData` from the browse
+  response, and the playlist case needs an anchor track (the offset is ignored).
+- **A single-category search** offers a real `nextContinuationData` token worth
+  20 more rows.
+- **A grouped "All" search** offers only `reloadContinuationData`, which looks
+  like a paging token and is not: sending it back returns an empty page. Its
+  results are already complete. So "Load more results" appears in the expanded
+  view only, and an empty page reports "no more results" rather than appearing
+  to ignore the click.
+
 ### Feeds
 
 The Home and Explore feeds only return a handful of shelves in the first
