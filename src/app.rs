@@ -62,6 +62,8 @@ enum Msg {
     Playlists(Result<Vec<(String, String)>, String>),
     /// A playlist edit finished; the string is what to tell the user.
     PlaylistEdited(Result<String, String>),
+    /// The version the chosen yt-dlp reports, for the settings window.
+    YtdlpVersion(Option<String>),
     /// Further search results, appended to the current ones.
     MoreResults(Result<(Vec<SearchItem>, Option<String>), String>),
     /// A playlist was deleted. Its page has to go away if it is open.
@@ -108,6 +110,11 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// How often the desktop's media widget is refreshed. MPRIS has no
 /// position-changed signal, so clients poll; once a second is plenty.
 const MEDIA_PUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Beyond this, the chosen yt-dlp is old enough to warn about: YouTube changes
+/// and yt-dlp has to keep up, so a stale copy is the likeliest reason playback
+/// would stop working.
+const STALE_YTDLP_DAYS: u64 = 90;
 
 /// How long a click waits for sign-in before playing without it.
 const DEFERRED_PLAY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -549,6 +556,8 @@ pub struct App {
     /// Whether the settings window is showing, and what the cache holds.
     show_settings: bool,
     cache_usage: (usize, u64),
+    /// yt-dlp's self-reported version, asked for on demand.
+    ytdlp_version: Option<String>,
     /// Desktop media controls, if the desktop has any.
     media: media::Controls,
     /// The track the desktop is currently showing.
@@ -632,6 +641,11 @@ impl App {
         ui::install_fonts(&cc.egui_ctx);
 
         let ytdlp = resolver::locate_ytdlp();
+        if let Some(path) = &ytdlp {
+            // Say which copy was chosen. With several installed, "it is using
+            // the wrong yt-dlp" is a common and otherwise invisible problem.
+            eprintln!("[yt-dlp] using {}", path.display());
+        }
         resolver::clean_stale_parts();
         // Enforcing the cache budget walks the whole directory, so keep it off
         // the startup path.
@@ -714,6 +728,7 @@ impl App {
             want_more_results: false,
             show_settings: false,
             cache_usage: (0, 0),
+            ytdlp_version: None,
             media,
             media_for: None,
             last_media_push: Instant::now(),
@@ -1279,6 +1294,7 @@ impl App {
                 self.show_settings = false;
             } else {
                 self.cache_usage = resolver::cache_usage();
+                self.spawn_ytdlp_version(ctx);
                 self.show_settings = true;
             }
         }
@@ -1465,6 +1481,7 @@ impl App {
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Msg::YtdlpVersion(version) => self.ytdlp_version = version,
                 Msg::MoreResults(result) => match result {
                     Ok((items, more)) => {
                         // An empty page means there was nothing left to add;
@@ -2238,6 +2255,7 @@ impl App {
                             if ui.button("⚙  Settings…").clicked() {
                                 // Measure the cache as it opens, not every frame.
                                 self.cache_usage = resolver::cache_usage();
+                                self.spawn_ytdlp_version(ctx);
                                 self.show_settings = true;
                                 ui.close();
                             }
@@ -2720,6 +2738,28 @@ impl App {
         });
     }
 
+    /// Ask the chosen yt-dlp for its version. Spawns a process, so it happens
+    /// when the settings window opens rather than at startup.
+    fn spawn_ytdlp_version(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.ytdlp.clone() else {
+            return;
+        };
+        if self.ytdlp_version.is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            // Blocking, so keep it off the async worker threads.
+            let version = tokio::task::spawn_blocking(move || resolver::ytdlp_version(&path))
+                .await
+                .ok()
+                .flatten();
+            let _ = tx.send(Msg::YtdlpVersion(version));
+            ctx.request_repaint();
+        });
+    }
+
     /// The settings window.
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
@@ -2804,13 +2844,41 @@ impl App {
                 ui.add_space(6.0);
 
                 ui.label(ui::title("Playback").size(16.0));
-                match resolver::locate_ytdlp() {
+                match &self.ytdlp {
                     Some(path) => {
                         ui.label(
                             RichText::new(format!("yt-dlp: {}", path.display()))
                                 .weak()
                                 .small(),
                         );
+                        let age = resolver::ytdlp_age(path).map(|age| age.as_secs() / 86_400);
+                        match (&self.ytdlp_version, age) {
+                            (Some(version), Some(days)) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "version {version}, written {days} days ago"
+                                    ))
+                                    .weak()
+                                    .small(),
+                                );
+                                if days > STALE_YTDLP_DAYS {
+                                    ui.label(
+                                        RichText::new(
+                                            "That copy is getting old. yt-dlp has to be updated when \
+                                             YouTube changes, so update it — or download this app again.",
+                                        )
+                                        .color(ui::WARN)
+                                        .small(),
+                                    );
+                                }
+                            }
+                            (Some(version), None) => {
+                                ui.label(RichText::new(format!("version {version}")).weak().small());
+                            }
+                            _ => {
+                                ui.label(RichText::new("Checking the version…").weak().small());
+                            }
+                        }
                     }
                     None => {
                         ui.label(

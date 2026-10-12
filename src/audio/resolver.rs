@@ -86,12 +86,100 @@ fn beside_executable() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Find a usable `yt-dlp` binary, preferring an explicit override.
+/// Every `yt-dlp` we can find, in the order they are preferred when they are
+/// equally fresh: an explicit override, the copy shipped beside us, a
+/// user-local install, then whatever is on `PATH`.
+fn candidates() -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for candidate in [
+        env_override(),
+        beside_executable(),
+        home_bin(),
+        search_path(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !found.contains(&candidate) {
+            found.push(candidate);
+        }
+    }
+    found
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Choose between candidates by how recently each was written, falling back to
+/// preference order.
+///
+/// Split out from the filesystem work so the rule itself can be tested.
+fn freshest(candidates: &[(PathBuf, Option<SystemTime>)]) -> Option<PathBuf> {
+    let mut best: Option<(&SystemTime, usize, &PathBuf)> = None;
+    for (index, (path, time)) in candidates.iter().enumerate() {
+        let Some(time) = time else {
+            continue;
+        };
+        let better = match best {
+            None => true,
+            // Ties go to the earlier candidate, which is the more deliberate
+            // location (beside the binary beats whatever is on PATH).
+            Some((best_time, best_index, _)) => {
+                time > best_time || (time == best_time && index < best_index)
+            }
+        };
+        if better {
+            best = Some((time, index, path));
+        }
+    }
+    best.map(|(_, _, path)| path.clone())
+        .or_else(|| candidates.first().map(|(path, _)| path.clone()))
+}
+
+/// Find a usable `yt-dlp` binary.
+///
+/// `YTDLP_PATH` is an instruction rather than a guess, so it wins outright.
+/// Otherwise the **freshest** candidate wins, not the first one found: the
+/// bundle ships a copy frozen at release time, and yt-dlp is exactly the part
+/// that breaks when YouTube changes — so preferring the bundled copy
+/// unconditionally would leave a released build unable to play anything until
+/// the app itself was updated. Which binary was written most recently is a good
+/// proxy for which is current, and it costs a `stat` rather than running
+/// `--version` (over a second on a PyInstaller build).
 pub fn locate_ytdlp() -> Option<PathBuf> {
-    env_override()
-        .or_else(beside_executable)
-        .or_else(home_bin)
-        .or_else(search_path)
+    if let Some(explicit) = env_override() {
+        return Some(explicit);
+    }
+    let found = candidates();
+    let with_times: Vec<(PathBuf, Option<SystemTime>)> = found
+        .iter()
+        .map(|path| (path.clone(), modified(path)))
+        .collect();
+    freshest(&with_times)
+}
+
+/// The version `yt-dlp` reports, for diagnostics.
+///
+/// Spawns a process (over a second), so ask on demand — the settings window —
+/// rather than at startup.
+pub fn ytdlp_version(ytdlp: &Path) -> Option<String> {
+    let output = std::process::Command::new(ytdlp)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!version.is_empty()).then_some(version)
+}
+
+/// How long ago the chosen `yt-dlp` was written.
+///
+/// A proxy for its age: both a download and a package update refresh it.
+pub fn ytdlp_age(ytdlp: &Path) -> Option<Duration> {
+    modified(ytdlp)?.elapsed().ok()
 }
 
 /// Directory holding the decoded-audio cache.
@@ -707,5 +795,55 @@ mod failure_tests {
     #[test]
     fn copes_with_no_stderr() {
         assert!(!explain_failure("").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::freshest;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    fn at(secs: u64, name: &str) -> (PathBuf, Option<SystemTime>) {
+        (
+            PathBuf::from(name),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+        )
+    }
+
+    /// The whole point: a bundled copy frozen at release time must lose to a
+    /// system copy that has been updated since.
+    #[test]
+    fn prefers_the_most_recently_written() {
+        let candidates = vec![at(1_000, "beside-exe"), at(2_000, "on-path")];
+        assert_eq!(freshest(&candidates), Some(PathBuf::from("on-path")));
+        let reversed = vec![at(2_000, "beside-exe"), at(1_000, "on-path")];
+        assert_eq!(freshest(&reversed), Some(PathBuf::from("beside-exe")));
+    }
+
+    /// Equal timestamps fall back to preference order, so a deliberate location
+    /// beats a stray one on PATH.
+    #[test]
+    fn ties_keep_preference_order() {
+        let candidates = vec![at(5_000, "beside-exe"), at(5_000, "on-path")];
+        assert_eq!(freshest(&candidates), Some(PathBuf::from("beside-exe")));
+    }
+
+    /// An unreadable candidate is skipped rather than aborting the search.
+    #[test]
+    fn skips_candidates_without_a_timestamp() {
+        let candidates = vec![(PathBuf::from("unreadable"), None), at(10, "readable")];
+        assert_eq!(freshest(&candidates), Some(PathBuf::from("readable")));
+    }
+
+    /// With no timestamps at all, the first candidate still wins.
+    #[test]
+    fn falls_back_to_the_first_candidate() {
+        let candidates = vec![
+            (PathBuf::from("first"), None),
+            (PathBuf::from("second"), None),
+        ];
+        assert_eq!(freshest(&candidates), Some(PathBuf::from("first")));
+        assert_eq!(freshest(&[]), None);
     }
 }

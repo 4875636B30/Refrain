@@ -277,10 +277,21 @@ optional properties, so repeat and shuffle remain app-only.
 The binary looks for `yt-dlp` in this order, which makes a self-contained
 distribution possible:
 
-1. `$YTDLP_PATH`
+1. `$YTDLP_PATH` — an instruction rather than a guess, so it wins outright
 2. **next to the executable** (ship `yt-dlp_linux` beside the binary)
 3. `~/.local/bin/yt-dlp`
 4. anywhere on `$PATH`
+
+The first three are *candidates*, and the one written most recently wins, with
+that order breaking ties. This matters more than it looks: the bundle ships a
+copy frozen at release time, and yt-dlp is exactly the part that breaks when
+YouTube changes — so preferring the bundled copy unconditionally would leave a
+released build unable to play anything until the app itself was updated.
+Freshness is judged by mtime, which costs a `stat`; running `--version` instead
+would add over a second per candidate to every startup.
+
+Settings shows which copy was chosen, its version and how old it is, and warns
+past 90 days — so a stale copy is visible rather than mysterious.
 
 A release bundle is therefore the binary plus `yt-dlp_linux`, plus `ffmpeg`
 (needed only for the download fallback).

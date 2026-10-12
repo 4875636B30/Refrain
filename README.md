@@ -73,7 +73,10 @@ cargo run --release
 **To run it:**
 
 - **`yt-dlp`** — found on `PATH`, at `~/.local/bin/yt-dlp`, or set `YTDLP_PATH`.
-  The release bundle ships one.
+  The release bundle ships one, and if you have a *newer* copy elsewhere that
+  one is used instead: yt-dlp is the part that breaks when YouTube changes, so
+  a stale bundled copy would otherwise take playback down with it. Settings
+  shows which copy is in use and how old it is.
 - **A JavaScript runtime** — `node` or `deno` on `PATH`. `yt-dlp` needs one to
   solve YouTube's JS challenges, and Refrain passes `--js-runtimes` for you.
 - **`ffmpeg`** — only for the download fallback.
