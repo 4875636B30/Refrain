@@ -121,6 +121,24 @@ minutes is never evicted: it may be the track that is playing, one being warmed,
 or a fetch still in flight, and the cache would rather sit briefly over budget
 than delete something in use.
 
+## Failure messages
+
+yt-dlp's stderr is written for developers, and several of its failures have a
+specific fix worth naming. `explain_failure` maps the recognisable ones — a
+missing JS runtime, a bot check, a region block, an age gate, no playable format,
+no network — to a sentence that says what to do, falling back to yt-dlp's own
+last `ERROR:` line for anything unrecognised. The mapping is a pure function with
+tests, and the ordering matters: an age-restricted message also says "sign in to
+confirm", so the specific case has to be recognised first.
+
+A failed *stream* needed more than a mapping. rodio reports a reader that errors
+as "the format of the data has not been recognized", which hides the cause
+entirely, so the downloader's stderr is drained on its own thread and the
+decision to report a failure is made *before* the stream is marked done — a
+reader that sees EOF first will surface rodio's message instead. `StreamFailure`
+exists so a caller can ask afterwards why it failed, once the decoder has taken
+ownership of the source.
+
 ## Memory
 
 - Artwork is decoded to at most 160 px and cached with a bounded LRU, so browsing

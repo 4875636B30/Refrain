@@ -880,7 +880,14 @@ impl App {
             .name("ytm-prefetch".into())
             .spawn(move || {
                 let result = match crate::audio::stream::RemoteSource::new(args, cache) {
-                    Ok(source) => rodio::Decoder::new(source).map_err(|e| e.to_string()),
+                    Ok(source) => {
+                        // Ask the stream itself on failure: rodio reports a
+                        // failed reader as an unrecognised format, which hides
+                        // the actual reason.
+                        let failure = source.failure_handle();
+                        rodio::Decoder::new(source)
+                            .map_err(|e| failure.get().unwrap_or_else(|| e.to_string()))
+                    }
                     Err(e) => Err(e.to_string()),
                 };
                 let _ = tx.send(Msg::Prefetched { track, result });

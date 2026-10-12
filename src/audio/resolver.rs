@@ -114,6 +114,75 @@ const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// track that is playing, one being warmed, or a fetch still in flight.
 const CACHE_PROTECT: Duration = Duration::from_secs(10 * 60);
 
+/// Turn yt-dlp's stderr into something a person can act on.
+///
+/// The raw text is written for developers — `ERROR: [youtube] <id>: Sign in to
+/// confirm you're not a bot` — and several of these failures have a specific fix
+/// worth naming rather than leaving the reader to infer it. Anything
+/// unrecognised falls back to yt-dlp's own last error line, which still beats a
+/// generic message.
+pub fn explain_failure(stderr: &str) -> String {
+    let lower = stderr.to_lowercase();
+
+    // yt-dlp delegates YouTube's JS challenges to a real runtime.
+    if lower.contains("page needs to be reloaded")
+        || lower.contains("js challenge")
+        || lower.contains("signature solving failed")
+    {
+        return "YouTube's JavaScript challenge could not be solved — install `node` \
+                (or `deno`) so yt-dlp can run it."
+            .to_string();
+    }
+    if lower.contains("available in your country") || lower.contains("blocked it in your country") {
+        return "This track is not available in your region.".to_string();
+    }
+    if lower.contains("age-restricted")
+        || lower.contains("age restricted")
+        || lower.contains("confirm your age")
+    {
+        return "This track is age-restricted, which needs a signed-in session.".to_string();
+    }
+    if lower.contains("not a bot") {
+        return "YouTube asked for a bot check. Sign in to music.youtube.com in your \
+                browser, then use Refresh sign-in in Settings."
+            .to_string();
+    }
+    if lower.contains("private video") {
+        return "This track is private.".to_string();
+    }
+    if lower.contains("video unavailable")
+        || lower.contains("video is unavailable")
+        || lower.contains("this video is not available")
+    {
+        return "This track is unavailable on YouTube.".to_string();
+    }
+    if lower.contains("requested format is not available") {
+        return "No playable audio stream was offered for this track.".to_string();
+    }
+    if lower.contains("name resolution")
+        || lower.contains("unable to download webpage")
+        || lower.contains("getaddrinfo")
+    {
+        return "Could not reach YouTube — check your network connection.".to_string();
+    }
+    if lower.contains("ffmpeg") && lower.contains("not") {
+        return "ffmpeg is needed for this track but was not found.".to_string();
+    }
+
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("ERROR"))
+        .map(|line| {
+            line.trim_start_matches("ERROR")
+                .trim_start_matches(':')
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_else(|| "yt-dlp failed for an unrecognised reason".to_string())
+}
+
 /// How much cached audio is on disk: (tracks, bytes).
 pub fn cache_usage() -> (usize, u64) {
     let Ok(entries) = std::fs::read_dir(cache_dir()) else {
@@ -309,10 +378,7 @@ pub async fn resolve_url(video_id: &str, auth: &crate::config::AuthConfig) -> Re
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "could not resolve {video_id}: {}",
-            stderr.trim().lines().last().unwrap_or("unknown error")
-        );
+        bail!("could not resolve {video_id}: {}", explain_failure(&stderr));
     }
 
     let url = String::from_utf8_lossy(&output.stdout)
@@ -505,21 +571,8 @@ pub async fn download_track(video_id: &str, auth: &crate::config::AuthConfig) ->
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr
-            .trim()
-            .lines()
-            .last()
-            .unwrap_or("unknown error")
-            .to_string();
         let _ = std::fs::remove_dir_all(&tmp);
-        if stderr.contains("Sign in to confirm") || stderr.contains("not a bot") {
-            bail!(
-                "YouTube refused anonymous access to this track (bot check). Sign into \
-                 music.youtube.com in your browser, or set a cookie source in \
-                 ~/.config/refrain/config.toml."
-            );
-        }
-        bail!("yt-dlp failed for {video_id}: {last}");
+        bail!("{}", explain_failure(&stderr));
     }
 
     // yt-dlp picks the extension, so locate whatever it produced.
@@ -596,5 +649,63 @@ mod tests {
         let files = vec![file(1, 800, "a"), file(2, 800, "b")];
         let plan = eviction_plan(files, 100, SystemTime::now(), Duration::from_secs(600));
         assert!(plan.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::explain_failure;
+
+    /// Each of these has a specific fix, so the message should name it rather
+    /// than echoing yt-dlp's phrasing back at the reader.
+    #[test]
+    fn names_the_fix_for_known_failures() {
+        let cases = [
+            (
+                "ERROR: [youtube] abc: The page needs to be reloaded",
+                "node",
+            ),
+            (
+                "ERROR: [youtube] abc: Sign in to confirm you're not a bot. Use --cookies",
+                "bot check",
+            ),
+            (
+                "ERROR: [youtube] abc: The uploader has not made this video available in your country",
+                "region",
+            ),
+            (
+                "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate",
+                "age-restricted",
+            ),
+            (
+                "ERROR: [youtube] abc: Private video. Sign in if you've been granted access",
+                "private",
+            ),
+            ("ERROR: [youtube] abc: Video unavailable", "unavailable"),
+            (
+                "ERROR: [youtube] abc: Requested format is not available. Use --list-formats",
+                "No playable audio stream",
+            ),
+        ];
+        for (stderr, expected) in cases {
+            let message = explain_failure(stderr);
+            assert!(
+                message.to_lowercase().contains(&expected.to_lowercase()),
+                "{stderr:?} produced {message:?}, which does not mention {expected:?}"
+            );
+        }
+    }
+
+    /// An unrecognised failure still reports yt-dlp's own error line.
+    #[test]
+    fn falls_back_to_the_last_error_line() {
+        let stderr = "[youtube] abc: Downloading webpage\nERROR: something peculiar happened\n";
+        assert_eq!(explain_failure(stderr), "something peculiar happened");
+    }
+
+    /// Empty stderr must not panic or produce an empty message.
+    #[test]
+    fn copes_with_no_stderr() {
+        assert!(!explain_failure("").is_empty());
     }
 }

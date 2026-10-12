@@ -297,7 +297,9 @@ fn play_test_cmd(video_id: &str) -> anyhow::Result<()> {
     // Phase 1: what hover/page-load prefetching does (hidden from the user).
     let prefetch = std::time::Instant::now();
     let source = audio::stream::RemoteSource::new(args, cache)?;
-    let decoder = rodio::Decoder::new(source)?;
+    let failure = source.failure_handle();
+    let decoder = rodio::Decoder::new(source)
+        .map_err(|e| anyhow::anyhow!(failure.get().unwrap_or_else(|| e.to_string())))?;
     println!(
         "prefetch (open + decode) took {:?} (total {:?})",
         prefetch.elapsed(),
@@ -343,7 +345,9 @@ fn stream_cmd(video_id: &str) -> anyhow::Result<()> {
 
     let started = std::time::Instant::now();
     let source = audio::stream::RemoteSource::new(args, cache)?;
-    let decoder = rodio::Decoder::new(source)?;
+    let failure = source.failure_handle();
+    let decoder = rodio::Decoder::new(source)
+        .map_err(|e| anyhow::anyhow!(failure.get().unwrap_or_else(|| e.to_string())))?;
     println!(
         "decoder opened in {:?} (total {:?})",
         started.elapsed(),

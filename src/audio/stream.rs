@@ -89,10 +89,11 @@ impl RemoteSource {
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("spawning yt-dlp for streaming")?;
         let stdout = child.stdout.take().context("capturing yt-dlp stdout")?;
+        let stderr = child.stderr.take();
 
         let shared = Arc::new((
             Mutex::new(Window {
@@ -110,10 +111,25 @@ impl RemoteSource {
         let thread_stop = Arc::clone(&stop);
         std::thread::Builder::new()
             .name("refrain-stream".into())
-            .spawn(move || prefetch(child, stdout, cache, thread_shared, thread_stop))
+            .spawn(move || prefetch(child, stdout, stderr, cache, thread_shared, thread_stop))
             .context("spawning stream reader thread")?;
 
         Ok(Self { shared, stop })
+    }
+}
+
+/// A cheap handle to a stream's failure state, kept after the source itself has
+/// been handed to a decoder.
+///
+/// Needed because rodio reports a reader that errors as "the format of the data
+/// has not been recognized", which says nothing about the cause. Asking this
+/// afterwards recovers the downloader's own explanation.
+#[derive(Clone)]
+pub struct StreamFailure(Arc<(Mutex<Window>, Condvar)>);
+
+impl StreamFailure {
+    pub fn get(&self) -> Option<String> {
+        self.0.0.lock().ok().and_then(|window| window.error.clone())
     }
 }
 
@@ -121,6 +137,13 @@ impl Drop for RemoteSource {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.shared.1.notify_all();
+    }
+}
+
+impl RemoteSource {
+    /// Keep this to find out why a stream failed, after the decoder has it.
+    pub fn failure_handle(&self) -> StreamFailure {
+        StreamFailure(Arc::clone(&self.shared))
     }
 }
 
@@ -175,11 +198,33 @@ impl Seek for RemoteSource {
 fn prefetch(
     mut child: Child,
     mut stdout: impl Read,
+    stderr: Option<impl Read + Send + 'static>,
     cache: Option<PathBuf>,
     shared: Arc<(Mutex<Window>, Condvar)>,
     stop: Arc<AtomicBool>,
 ) {
     let (window_lock, ready) = &*shared;
+
+    // Drain stderr on its own thread. Left unread, a full pipe would block
+    // yt-dlp writing to it and it would never finish.
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let drain = stderr.and_then(|mut pipe| {
+        let sink = Arc::clone(&stderr_text);
+        std::thread::Builder::new()
+            .name("refrain-stream-err".into())
+            .spawn(move || {
+                let mut buffer = [0u8; 4096];
+                while let Ok(n) = pipe.read(&mut buffer) {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut text) = sink.lock() {
+                        text.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                    }
+                }
+            })
+            .ok()
+    });
 
     let cache_paths = cache.map(|final_path| {
         let scratch = final_path.with_extension("part");
@@ -219,15 +264,41 @@ fn prefetch(
         }
     }
 
+    // Stop yt-dlp if we bailed out early (track changed, app closing…).
+    let stopped_early = stop.load(Ordering::Relaxed);
+    if stopped_early {
+        let _ = child.kill();
+    }
+    let status = child.wait();
+    if let Some(handle) = drain {
+        let _ = handle.join();
+    }
+
+    // A downloader that exited badly should say why. This has to be decided
+    // *before* `done` is set: a reader that sees EOF first reports a decode
+    // error instead, which says nothing about the real cause.
+    let succeeded = status.map(|status| status.success()).unwrap_or(false);
+    let failed = !stopped_early && !succeeded;
+    let failure = failed.then(|| {
+        let text = stderr_text
+            .lock()
+            .map(|text| text.clone())
+            .unwrap_or_default();
+        crate::audio::resolver::explain_failure(&text)
+    });
+
     {
         let mut window = window_lock.lock().unwrap();
-        window.done = true;
+        match failure {
+            Some(message) => {
+                window.error = Some(message);
+                // Whatever arrived is a truncated file, not worth caching.
+                complete = false;
+            }
+            None => window.done = true,
+        }
     }
     ready.notify_all();
-
-    // Stop yt-dlp if we bailed out early (track changed, app closing…).
-    let _ = child.kill();
-    let _ = child.wait();
 
     drop(file);
     if let Some((scratch, final_path)) = cache_paths {
