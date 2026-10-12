@@ -1,10 +1,36 @@
-# Flathub: `io.github.4875636B30.Refrain`
+# Flathub: `io.github._4875636B30.Refrain`
 
 The manifest here is a **template**, not a working submission. Flathub apps live
 in their own repository (`flathub/io.github.4875636B30.Refrain`) containing the
 manifest at the root and `cargo-sources.json` beside it. Nothing here has been
 built in a Flatpak — there is no SDK or `flatpak-builder` on the machine this
 was written on — so treat the manifest as reviewed, not tested.
+
+## Before submitting this
+
+**Do not submit the manifest here as it stands.** Flathub's [Generative AI
+policy](https://docs.flathub.org/docs/for-app-authors/requirements#generative-ai-policy)
+says a Flathub manifest must not contain AI-generated or AI-assisted content,
+and disclosure does not exempt a manifest from that rule. This draft was written
+with AI assistance, so treat it as a reference for what the manifest has to
+contain, and write the one you submit yourself.
+
+Three things the draft gets wrong, all reported by Flathub's own linter
+(`flatpak run --command=flatpak-builder-lint org.flatpak.Builder`):
+
+- **The app id.** A component beginning with a digit needs a leading
+  underscore, so the id is `io.github._4875636B30.Refrain`. Without it,
+  `flatpak build-init` refuses the name outright and the linter reports
+  `appid-component-wrong-syntax`.
+- **The runtime.** It must be the latest at the time of submission. The linter
+  currently reports
+  `runtime-update-available-to-org.freedesktop.Platform-26.08`.
+- **yt-dlp is downloaded prebuilt.** Every runtime dependency in a manifest has
+  to be built from source, so this needs a build step, or an accepted exception.
+
+The metainfo also has to be installed as `%{id}.metainfo.xml` — that is,
+`io.github._4875636B30.Refrain.metainfo.xml` — matching the manifest's `id`
+exactly.
 
 ## The pieces
 
