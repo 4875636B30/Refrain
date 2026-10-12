@@ -598,6 +598,17 @@ fn canary_cmd() -> anyhow::Result<()> {
             // 3. yt-dlp must be present, run, and still resolve a stream. A bot
             //    check is YouTube answering rather than yt-dlp breaking, so it
             //    is a note; anything else means playback is broken.
+            // yt-dlp cannot solve YouTube's challenges without one, and the
+            // failure mode without it is a confusing challenge error — so name
+            // the runtime, and fail when there is none.
+            let js = audio::resolver::js_runtime_args();
+            match js.last() {
+                Some(spec) => println!("ok      JavaScript runtime: {spec}"),
+                None => failures.push(
+                    "no JavaScript runtime found — install node, deno or quickjs".to_string(),
+                ),
+            }
+
             match audio::resolver::locate_ytdlp() {
                 Some(path) => {
                     let version = audio::resolver::ytdlp_version(&path);

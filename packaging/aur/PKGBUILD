@@ -1,0 +1,55 @@
+# Maintainer: <your name> <you@example.com>
+#
+# The AUR wants a maintainer line with a contact address. Fill this in before
+# pushing, or there is nobody to blame when it breaks.
+
+pkgname=refrain-bin
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="Fast, low-memory desktop client for YouTube Music"
+arch=('x86_64')
+url="https://github.com/4875636B30/Refrain"
+license=('MIT')
+
+# `alsa-lib` is the only library the binary links beyond glibc; X11, Wayland and
+# GL are loaded at runtime by winit and glutin, so they are needed to open a
+# window but do not show up in `ldd`.
+depends=(
+  'alsa-lib'
+  'libx11'
+  'libxkbcommon'
+  'wayland'
+  'mesa'
+  # Resolves and streams the audio. Nothing plays without it.
+  'yt-dlp'
+)
+optdepends=(
+  "nodejs: JavaScript runtime yt-dlp needs to solve YouTube's challenges — playback fails without one"
+  'deno: alternative JavaScript runtime'
+  'quickjs: alternative JavaScript runtime, far smaller than nodejs'
+  'ffmpeg: transcodes a stream the fast path could not use'
+)
+
+provides=('refrain')
+conflicts=('refrain')
+
+source=("${pkgname}-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/refrain-${pkgver}-linux-x86_64.tar.gz")
+sha256sums=('ea56e03a838e69e883d31495e0d71607cd9eebdf120d8eaa21f2378bc28dde68')
+
+package() {
+  local bundle="${srcdir}/refrain-${pkgver}-linux-x86_64"
+
+  install -Dm755 "${bundle}/refrain" "${pkgdir}/usr/bin/refrain"
+  install -Dm644 "${bundle}/refrain.desktop" \
+    "${pkgdir}/usr/share/applications/refrain.desktop"
+  install -Dm644 "${bundle}/refrain.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/refrain.svg"
+  install -Dm644 "${bundle}/refrain.metainfo.xml" \
+    "${pkgdir}/usr/share/metainfo/refrain.metainfo.xml"
+  install -Dm644 "${bundle}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+  # The bundle's own yt-dlp is deliberately not installed: this package depends
+  # on the distribution's, which is updated far more often than a release — and
+  # the client prefers whichever copy is newer, so the packaged one wins anyway.
+}

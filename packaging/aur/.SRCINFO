@@ -1,0 +1,23 @@
+pkgbase = refrain-bin
+	pkgdesc = Fast, low-memory desktop client for YouTube Music
+	pkgver = 0.1.1
+	pkgrel = 1
+	url = https://github.com/4875636B30/Refrain
+	arch = x86_64
+	license = MIT
+	depends = alsa-lib
+	depends = libx11
+	depends = libxkbcommon
+	depends = wayland
+	depends = mesa
+	depends = yt-dlp
+	optdepends = nodejs: JavaScript runtime yt-dlp needs to solve YouTube's challenges — playback fails without one
+	optdepends = deno: alternative JavaScript runtime
+	optdepends = quickjs: alternative JavaScript runtime, far smaller than nodejs
+	optdepends = ffmpeg: transcodes a stream the fast path could not use
+	provides = refrain
+	conflicts = refrain
+	source = refrain-bin-0.1.1.tar.gz::https://github.com/4875636B30/Refrain/releases/download/v0.1.1/refrain-0.1.1-linux-x86_64.tar.gz
+	sha256sums = ea56e03a838e69e883d31495e0d71607cd9eebdf120d8eaa21f2378bc28dde68
+
+pkgname = refrain-bin

@@ -110,8 +110,10 @@ cargo run --release
   one is used instead: yt-dlp is the part that breaks when YouTube changes, so
   a stale bundled copy would otherwise take playback down with it. Settings
   shows which copy is in use and how old it is.
-- **A JavaScript runtime** — `node` or `deno` on `PATH`. `yt-dlp` needs one to
-  solve YouTube's JS challenges, and Refrain passes `--js-runtimes` for you.
+- **A JavaScript runtime** — `node`, `deno` or `quickjs` on `PATH`, or beside the
+  executable. `yt-dlp` needs one to solve YouTube's JS challenges, and Refrain
+  passes `--js-runtimes` for you. QuickJS is the smallest by far (about 1 MB
+  against Node's 50), and the Flatpak bundles it.
 - **`ffmpeg`** — only for the download fallback.
 - **A signed-in browser** for your library and reliable playback. Anonymous
   playback is bot-blocked for much of the catalogue.
@@ -127,6 +129,13 @@ cargo run --release
 
 No D-Bus development headers are needed: the media controls use `zbus`, which is
 pure Rust.
+
+### Packages
+
+| | |
+| --- | --- |
+| **AUR** | `refrain-bin` — see [packaging/aur](packaging/aur) for the PKGBUILD and how to publish it |
+| **Flathub** | manifest drafted in [packaging/flathub](packaging/flathub); not submitted yet, and the sandbox's sign-in story is still open |
 
 ## First run
 

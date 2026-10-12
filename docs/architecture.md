@@ -314,6 +314,18 @@ MPRIS has no position-changed signal, so position is refreshed once a second.
 `LoopStatus` and `Shuffle` are not exposed — souvlaki doesn't implement those
 optional properties, so repeat and shuffle remain app-only.
 
+## The JavaScript runtime
+
+yt-dlp cannot solve YouTube's challenges without one, and the failure without it
+is a challenge error that says nothing about the cause. It accepts `deno`, `node`,
+`quickjs` and `bun`, and the client looks for them in that order — except that a
+runtime **beside its own executable wins over anything on `PATH`**.
+
+That lookup order is what makes a bundle self-sufficient without bundling Node:
+QuickJS is about 1 MB against Node's 50, and the Flatpak manifest builds it from
+source. It is also why the runtime is worth *naming* in diagnostics — `--canary`
+reports which one was found, and fails when there is none.
+
 ## Packaging
 
 The binary looks for `yt-dlp` in this order, which makes a self-contained
@@ -349,6 +361,19 @@ It is an AppImage rather than a Flatpak for a specific reason: yt-dlp needs a
 JavaScript runtime to solve YouTube's challenges, and a sandbox would need one
 *inside* it — which means bundling a whole Node. An AppImage has no such
 problem, because it can use the host's.
+
+Package-manager templates live in `packaging/`:
+
+- `packaging/aur/` — a `refrain-bin` PKGBUILD, which installs the release tarball
+  and depends on the distribution's `yt-dlp` rather than shipping the bundle's
+  (the packaged copy is updated far more often, and the client prefers whichever
+  is newer). The AUR is a git repository per package, so this is a template to
+  copy; nobody but the maintainer can push it.
+- `packaging/flathub/` — a manifest and the vendored crates Flathub needs for an
+  offline build. Neither has been built in a Flatpak: there is no SDK on the
+  machine this was written on, and Flathub's CI is the real test. The open
+  questions — sandboxed sign-in, and a pinned `yt-dlp` that ages — are written
+  down in `packaging/flathub/README.md`.
 
 Tagging a commit (`git tag v0.1.1 && git push --tags`) runs
 `.github/workflows/release.yml`, which builds with `--locked`, fetches the current

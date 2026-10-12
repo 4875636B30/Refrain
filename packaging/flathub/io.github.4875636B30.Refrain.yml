@@ -1,0 +1,92 @@
+# Flathub manifest for Refrain.
+#
+# This is a template: Flathub apps live in their own repository
+# (`flathub/io.github.4875636B30.Refrain`), which contains this manifest at the
+# root and `cargo-sources.json` beside it. See README.md in this directory for
+# the submission steps and the trade-offs that are still open.
+app-id: io.github.4875636B30.Refrain
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: refrain
+
+finish-args:
+  # A window: Wayland, or X11 for sessions that do not have it.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Sound.
+  - --socket=pulseaudio
+  # The catalogue and the media both come over the network, as does yt-dlp.
+  - --share=network
+  # Signing in reuses the browser's session, which means reading its cookie
+  # store from the host. Read-only, and only the profiles of the browsers the
+  # client knows how to ask yt-dlp about.
+  - --filesystem=~/.mozilla:ro
+  - --filesystem=~/.config/google-chrome:ro
+  - --filesystem=~/.config/chromium:ro
+  - --filesystem=~/.config/BraveSoftware:ro
+  - --filesystem=~/.config/microsoft-edge:ro
+  - --filesystem=~/.config/vivaldi:ro
+  - --filesystem=~/.config/opera:ro
+  # Chromium-family cookies are encrypted with a key held in the host keyring.
+  # Reading them also needs the `secretstorage` Python module, which the runtime
+  # does not ship — see README.md.
+  - --talk-name=org.freedesktop.secrets
+
+modules:
+  # yt-dlp needs a JavaScript runtime to solve YouTube's challenges, and the
+  # whole reason this is not a Node dependency is size: QuickJS is about 1 MB
+  # against Node's 50. The client looks for a runtime beside its own executable
+  # before looking on PATH, so this one is picked up automatically.
+  - name: quickjs
+    buildsystem: simple
+    build-commands:
+      - make -j "$FLATPAK_BUILDER_N_JOBS" qjs
+      - install -Dm755 qjs /app/bin/qjs
+    sources:
+      - type: archive
+        url: https://bellard.org/quickjs/quickjs-2025-04-26.tar.xz
+        sha256: 2f20074c25166ef6f781f381c50d57b502cb85d470d639abccebbef7954c83bf
+        strip-components: 1
+
+  # yt-dlp itself. Pinned, which means it goes stale between manifest bumps —
+  # unavoidable in a sandbox, where the client cannot see the host's copy. The
+  # upstream zipapp is used rather than building from source: it is the release
+  # artifact, and it is what the tarball and AppImage ship too.
+  - name: yt-dlp
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 yt-dlp /app/bin/yt-dlp
+    sources:
+      - type: file
+        url: https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp
+        sha256: 1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6
+
+  - name: refrain
+    buildsystem: simple
+    build-commands:
+      - . /usr/lib/sdk/rust-stable/enable.sh && cargo build --release --offline
+      - install -Dm755 target/release/refrain /app/bin/refrain
+      # Flathub wants the installed files named after the app id, so the desktop
+      # file and its Icon/launchable references are renamed on the way in.
+      - install -Dm644 packaging/refrain.desktop
+        /app/share/applications/io.github.4875636B30.Refrain.desktop
+      - sed -i 's/^Icon=refrain$/Icon=io.github.4875636B30.Refrain/'
+        /app/share/applications/io.github.4875636B30.Refrain.desktop
+      - install -Dm644 packaging/refrain.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.4875636B30.Refrain.svg
+      - install -Dm644 packaging/refrain.metainfo.xml
+        /app/share/metainfo/io.github.4875636B30.Refrain.metainfo.xml
+      - sed -i 's|<launchable type="desktop-id">refrain.desktop</launchable>|<launchable type="desktop-id">io.github.4875636B30.Refrain.desktop</launchable>|'
+        /app/share/metainfo/io.github.4875636B30.Refrain.metainfo.xml
+    sources:
+      - type: archive
+        url: https://github.com/4875636B30/Refrain/archive/refs/tags/v0.1.1.tar.gz
+        sha256: a17a886f152cd99cc722bc4e2904c78f2ca77c3fdd0a93d8de49e9df1e228752
+        strip-components: 1
+      # Every crate, vendored, so the build works with no network.
+      - cargo-sources.json

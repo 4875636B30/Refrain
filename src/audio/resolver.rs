@@ -36,21 +36,42 @@ fn which(name: &str) -> Option<PathBuf> {
 /// and only an out-of-PATH install uses the `name:path` form.
 pub(crate) fn js_runtime_args() -> Vec<String> {
     let name_only = |name: &str| vec!["--js-runtimes".to_string(), name.to_string()];
+    let with_path = |name: &str, path: &Path| {
+        vec![
+            "--js-runtimes".to_string(),
+            format!("{}:{}", name, path.display()),
+        ]
+    };
 
-    if which("deno").is_some() {
-        return name_only("deno");
+    // A runtime shipped beside us comes first: a bundle that carries one needs
+    // nothing installed, and this is how a Flatpak or an AppImage can be
+    // self-sufficient without bundling a whole Node.
+    for (name, file) in [
+        ("deno", "deno"),
+        ("node", "node"),
+        ("quickjs", "qjs"),
+        ("quickjs", "quickjs"),
+    ] {
+        if let Some(path) = beside_executable_named(file) {
+            return with_path(name, &path);
+        }
     }
-    if which("node").is_some() {
-        return name_only("node");
+
+    // Then the usual ones on PATH, in yt-dlp's own order of preference.
+    for name in ["deno", "node"] {
+        if which(name).is_some() {
+            return name_only(name);
+        }
     }
+    if let Some(path) = which("qjs").or_else(|| which("quickjs")) {
+        return with_path("quickjs", &path);
+    }
+
     // Deno's installer puts it in ~/.deno/bin, which may not be on PATH.
     if let Some(home) = std::env::var_os("HOME") {
         let dir = PathBuf::from(home).join(".deno/bin");
         if dir.join("deno").is_file() {
-            return vec![
-                "--js-runtimes".to_string(),
-                format!("deno:{}", dir.display()),
-            ];
+            return with_path("deno", &dir.join("deno"));
         }
     }
     Vec::new()
@@ -79,6 +100,13 @@ fn search_path() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join("yt-dlp"))
         .find(|p| p.is_file())
+}
+
+/// A file of this name next to our own executable.
+fn beside_executable_named(name: &str) -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let candidate = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    candidate.is_file().then_some(candidate)
 }
 
 /// A `yt-dlp` shipped next to our own executable, so the app can be distributed
