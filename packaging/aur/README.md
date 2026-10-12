@@ -21,7 +21,7 @@ the maintainer named in the PKGBUILD.
 ## Then
 
 ```sh
-git clone ssh://aur@aur.archlinux.org/refrain-bin.git
+git clone ssh://aur@aur.archlinux.org/refrain-music-bin.git
 cp PKGBUILD .SRCINFO refrain-music-bin/
 cd refrain-music-bin && git add PKGBUILD .SRCINFO
 git commit -m "Initial import: refrain-music-bin 0.1.2"

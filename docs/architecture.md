@@ -382,7 +382,7 @@ problem, because it can use the host's.
 
 Package-manager templates live in `packaging/`:
 
-- `packaging/aur/` — a `refrain-bin` PKGBUILD, which installs the release tarball
+- `packaging/aur/` — a `refrain-music-bin` PKGBUILD, which installs the release tarball
   and depends on the distribution's `yt-dlp` rather than shipping the bundle's
   (the packaged copy is updated far more often, and the client prefers whichever
   is newer). The AUR is a git repository per package, so this is a template to
