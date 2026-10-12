@@ -181,9 +181,10 @@ cargo run -- --like-status <video_id> # read a track's rating (read-only)
 Design notes, and the parts that turned out to be less obvious than they looked,
 are in **[docs/architecture.md](docs/architecture.md)**.
 
-Contributions are welcome — issues and pull requests both. If you're changing
-how responses are parsed, note that YouTube reshuffles its JSON regularly and the
-parser is deliberately tolerant rather than strict.
+Contributions are welcome — issues and pull requests both. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to set up, what CI checks, and the few
+conventions worth knowing (the parser is deliberately tolerant rather than
+strict, because YouTube reshuffles its JSON regularly).
 
 ## Legal
 
