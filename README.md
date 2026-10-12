@@ -9,6 +9,7 @@ A lightweight desktop client for YouTube Music, written in Rust.</p>
 
 <p align="center">
   <a href="https://github.com/4875636B30/Refrain/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/4875636B30/Refrain/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="../../releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/4875636B30/Refrain?style=flat-square&color=ff0000"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2b2b2b?style=flat-square"></a>
   <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-000000?style=flat-square&logo=rust&logoColor=white">
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux_x86_64-ff0000?style=flat-square">
@@ -52,7 +53,8 @@ install -Dm644 refrain.svg ~/.local/share/icons/hicolor/scalable/apps/refrain.sv
 install -Dm644 refrain.desktop ~/.local/share/applications/refrain.desktop
 install -Dm644 refrain.metainfo.xml ~/.local/share/metainfo/refrain.metainfo.xml
 
-# yt-dlp ships beside the binary, which is where Refrain looks for it first:
+# yt-dlp ships beside the binary. A newer copy anywhere else wins over it, so
+# playback keeps working as yt-dlp is updated:
 cp yt-dlp_linux ~/.local/bin/yt-dlp_linux
 ```
 
