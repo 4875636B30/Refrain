@@ -4,6 +4,8 @@
 //! the same `music.youtube.com/youtubei/v1/*` endpoints the web app uses, with
 //! a spoofed `WEB_REMIX` client context.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Context, Result, bail};
 use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER,
@@ -79,6 +81,13 @@ pub struct Client {
     lang: String,
     country: String,
     jar: Option<CookieJar>,
+    /// Set once the server has rejected our locale and English worked instead.
+    ///
+    /// The locale comes from the environment, so it can name a language YouTube
+    /// does not know — `eo` and `xx` are two letters and still invalid. That is
+    /// rejected outright rather than ignored, which would take search and
+    /// browsing down with it.
+    locale_fallback: AtomicBool,
 }
 
 impl Client {
@@ -114,6 +123,7 @@ impl Client {
             lang: lang.to_string(),
             country: country.to_string(),
             jar,
+            locale_fallback: AtomicBool::new(false),
         })
     }
 
@@ -150,12 +160,17 @@ impl Client {
     }
 
     fn context(&self) -> Value {
+        let (lang, country) = if self.locale_fallback.load(Ordering::Relaxed) {
+            ("en".to_string(), "US".to_string())
+        } else {
+            (self.lang.clone(), self.country.clone())
+        };
         json!({
             "client": {
                 "clientName": CLIENT_NAME,
                 "clientVersion": CLIENT_VERSION,
-                "hl": self.lang,
-                "gl": self.country,
+                "hl": lang,
+                "gl": country,
             },
             "user": { "lockedSafetyMode": false },
             "request": { "useSsl": true },
@@ -198,9 +213,29 @@ impl Client {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            // A locale YouTube doesn't recognise is refused rather than
+            // ignored, and it came from the environment rather than from us.
+            // English is always accepted, so try that once — and keep it only
+            // if it actually works, so a genuine bad request doesn't quietly
+            // change the user's language for the rest of the session.
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && self.lang != "en"
+                && !self.locale_fallback.load(Ordering::Relaxed)
+            {
+                self.locale_fallback.store(true, Ordering::Relaxed);
+                let mut retry = body.clone();
+                retry["context"] = self.context();
+                return match Box::pin(self.post(endpoint, retry)).await {
+                    Ok(value) => Ok(value),
+                    Err(e) => {
+                        self.locale_fallback.store(false, Ordering::Relaxed);
+                        Err(e)
+                    }
+                };
+            }
             bail!(
-                "InnerTube {endpoint} returned HTTP {status}: {}",
-                body_text.chars().take(200).collect::<String>()
+                "InnerTube {endpoint} failed ({status}): {}",
+                inner_tube_reason(&body_text)
             );
         }
         // The like endpoints reply with an empty body, so an absent payload is
@@ -390,6 +425,35 @@ pub struct MoreShelves {
     pub continuation: Option<String>,
 }
 
+/// Pull the human-readable reason out of an InnerTube error body.
+///
+/// The body is JSON like `{"error": {"code": 400, "message": "Request contains
+/// an invalid argument.", ...}}`, and the whole envelope is noise in a status
+/// bar — as anyone who has seen one will agree. Anything unparseable falls back
+/// to a truncated body, so the message is never empty.
+fn inner_tube_reason(body: &str) -> String {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.trim().chars().take(120).collect());
+
+    // A rejection for permission reasons is almost always a stale session, and
+    // saying so is more useful than repeating the server's wording.
+    let lower = message.to_lowercase();
+    if lower.contains("permission") || lower.contains("unauthorized") {
+        return format!("{message} — sign in again from Settings");
+    }
+    if message.is_empty() {
+        return "no reason given".to_string();
+    }
+    message
+}
+
 /// Playlists arrive as browse ids (`VLPL…`) but the editing endpoints take the
 /// bare id (`PL…`). Sending the wrong one is a silent no-op, so it happens in
 /// one place and is tested.
@@ -410,5 +474,43 @@ mod tests {
         assert_eq!(bare_playlist_id("VLPLaVLb"), "PLaVLb");
         // Album browse ids are not playlists and must not be mangled.
         assert_eq!(bare_playlist_id("MPREb_x"), "MPREb_x");
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::inner_tube_reason;
+
+    /// The real body that broke the canary, verbatim enough to matter.
+    #[test]
+    fn pulls_the_reason_out_of_the_envelope() {
+        let body = r#"{
+            "error": {
+                "code": 400,
+                "message": "Request contains an invalid argument.",
+                "errors": [{ "message": "Request contains an invalid argument.", "domain": "global" }]
+            }
+        }"#;
+        assert_eq!(
+            inner_tube_reason(body),
+            "Request contains an invalid argument."
+        );
+    }
+
+    /// A permission failure usually means a stale session, so say what to do.
+    #[test]
+    fn suggests_signing_in_for_permission_failures() {
+        let body = r#"{"error": {"code": 403, "message": "The caller does not have permission"}}"#;
+        let reason = inner_tube_reason(body);
+        assert!(reason.contains("permission"), "{reason}");
+        assert!(reason.contains("sign in"), "{reason}");
+    }
+
+    /// Never return an empty message, whatever the server sends.
+    #[test]
+    fn copes_with_bodies_that_are_not_json() {
+        assert_eq!(inner_tube_reason("<html>nope</html>"), "<html>nope</html>");
+        assert_eq!(inner_tube_reason(""), "no reason given");
+        assert!(!inner_tube_reason("{}").is_empty());
     }
 }
