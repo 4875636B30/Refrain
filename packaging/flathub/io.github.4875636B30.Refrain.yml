@@ -92,8 +92,8 @@ modules:
         /app/share/metainfo/io.github.4875636B30.Refrain.metainfo.xml
     sources:
       - type: archive
-        url: https://github.com/4875636B30/Refrain/archive/refs/tags/v0.1.1.tar.gz
-        sha256: a17a886f152cd99cc722bc4e2904c78f2ca77c3fdd0a93d8de49e9df1e228752
+        url: https://github.com/4875636B30/Refrain/archive/refs/tags/v0.1.2.tar.gz
+        sha256: 13e2a53210417cccb1496e43d288cc0deba7f0869386ba9154a97c69f93cc30e
         strip-components: 1
         x-checker-data:
           type: json

@@ -42,6 +42,13 @@
   <url type="homepage">https://github.com/4875636B30/Refrain</url>
   <url type="bugtracker">https://github.com/4875636B30/Refrain/issues</url>
 
+  <screenshots>
+    <screenshot type="default">
+      <caption>An album, playing, with the queue open</caption>
+      <image type="source">https://raw.githubusercontent.com/4875636B30/Refrain/master/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+
   <categories>
     <category>AudioVideo</category>
     <category>Audio</category>

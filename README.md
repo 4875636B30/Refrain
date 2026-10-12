@@ -15,7 +15,7 @@ A lightweight desktop client for YouTube Music, written in Rust.</p>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Linux_%C2%B7_macOS_%C2%B7_Windows-ff0000?style=flat-square">
 </p>
 
-![Refrain's home feed: quick picks, cover art, and the player bar](docs/screenshot.png)
+![Searching, opening an album, playing it, and opening the queue](docs/demo.gif)
 
 Refrain plays your YouTube Music library without a browser engine. It talks to
 the same internal endpoints the web app uses, and streams audio through
@@ -136,7 +136,7 @@ pure Rust.
 
 | | |
 | --- | --- |
-| **AUR** | `refrain-bin` — see [packaging/aur](packaging/aur) for the PKGBUILD and how to publish it |
+| **AUR** | `refrain-music-bin` — see [packaging/aur](packaging/aur) for the PKGBUILD and how to publish it |
 | **Flathub** | manifest drafted in [packaging/flathub](packaging/flathub); not submitted yet, and the sandbox's sign-in story is still open |
 
 ## First run
