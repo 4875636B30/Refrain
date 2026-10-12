@@ -46,7 +46,7 @@ package() {
   install -Dm644 "${bundle}/refrain.svg" \
     "${pkgdir}/usr/share/icons/hicolor/scalable/apps/refrain.svg"
   install -Dm644 "${bundle}/refrain.metainfo.xml" \
-    "${pkgdir}/usr/share/metainfo/refrain.metainfo.xml"
+    "${pkgdir}/usr/share/metainfo/io.github._4875636B30.Refrain.metainfo.xml"
   install -Dm644 "${bundle}/LICENSE" \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 

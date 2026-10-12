@@ -71,8 +71,11 @@ jobs:
           cp target/release/refrain "dist/${name}/"
           cp yt-dlp_linux "dist/${name}/"
           cp qjs "dist/${name}/"
-          cp packaging/refrain.desktop packaging/refrain.metainfo.xml \
-             packaging/refrain.svg "dist/${name}/"
+          cp packaging/refrain.desktop packaging/refrain.svg "dist/${name}/"
+          # Named after the app id: that is what AppStream requires of an
+          # installed metainfo file, and what software centres look for.
+          install -Dm644 packaging/refrain.metainfo.xml \
+             "dist/${name}/io.github._4875636B30.Refrain.metainfo.xml"
           cp README.md LICENSE "dist/${name}/"
           tar -C dist -czf "${name}.tar.gz" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
@@ -93,6 +96,8 @@ jobs:
           cp packaging/refrain.desktop AppDir/
           cp packaging/refrain.svg AppDir/
           cp packaging/refrain.svg AppDir/.DirIcon
+          install -Dm644 packaging/refrain.metainfo.xml \
+             "AppDir/usr/share/metainfo/io.github._4875636B30.Refrain.metainfo.xml"
           ln -sf usr/bin/refrain AppDir/AppRun
 
           curl -fsSL -o appimagetool \

@@ -2,18 +2,19 @@
 <!--
   AppStream metadata, so software centres can describe and install the app.
 
-  The id is reverse-DNS for the project's real home; it has to change with it,
-  since it is what software centres key on.
+  The id is reverse-DNS for the project's real home. The vendor component
+  carries a leading underscore because it starts with a digit: without it the
+  id is not a valid D-Bus-style name, and Flatpak rejects it.
 -->
 <component type="desktop-application">
-  <id>io.github.4875636B30.Refrain</id>
+  <id>io.github._4875636B30.Refrain</id>
 
   <name>Refrain</name>
   <summary>Fast, low-memory client for YouTube Music</summary>
 
   <!-- AppStream requires a developer id in lowercase, unlike the component
        id above, which conventionally keeps the project's capitalisation. -->
-  <developer id="io.github.4875636b30">
+  <developer id="io.github._4875636b30">
     <name>_4875636B30</name>
   </developer>
 
@@ -41,11 +42,17 @@
 
   <url type="homepage">https://github.com/4875636B30/Refrain</url>
   <url type="bugtracker">https://github.com/4875636B30/Refrain/issues</url>
+  <url type="vcs-browser">https://github.com/4875636B30/Refrain</url>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#c00000</color>
+    <color type="primary" scheme_preference="dark">#ff0000</color>
+  </branding>
 
   <screenshots>
     <screenshot type="default">
       <caption>An album, playing, with the queue open</caption>
-      <image type="source">https://raw.githubusercontent.com/4875636B30/Refrain/master/docs/screenshot.png</image>
+      <image type="source">https://raw.githubusercontent.com/4875636B30/Refrain/72e241c86c16e13741748cd9680c3c2b6001c19c/docs/screenshot.png</image>
     </screenshot>
   </screenshots>
 
@@ -60,12 +67,25 @@
   </provides>
 
   <requires>
-    <display_length compare="ge">360</display_length>
+    <display_length compare="ge">768</display_length>
   </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
 
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.3" date="2026-10-13">
+      <description>
+        <p>Corrects the application ID in the AppStream metadata: a component
+           that begins with a digit needs a leading underscore, and without one
+           the ID is not a valid Flatpak application name.</p>
+        <p>The scripted demo no longer stalls waiting for a repaint.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-10-13">
       <description>
         <p>Downloads carry QuickJS, so playback no longer needs a JavaScript

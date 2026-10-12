@@ -81,7 +81,8 @@ cd refrain-*-linux-x86_64
 install -Dm755 refrain ~/.local/bin/refrain
 install -Dm644 refrain.svg ~/.local/share/icons/hicolor/scalable/apps/refrain.svg
 install -Dm644 refrain.desktop ~/.local/share/applications/refrain.desktop
-install -Dm644 refrain.metainfo.xml ~/.local/share/metainfo/refrain.metainfo.xml
+install -Dm644 io.github._4875636B30.Refrain.metainfo.xml \
+    ~/.local/share/metainfo/io.github._4875636B30.Refrain.metainfo.xml
 
 # yt-dlp ships beside the binary. A newer copy anywhere else wins over it, so
 # playback keeps working as yt-dlp is updated:
