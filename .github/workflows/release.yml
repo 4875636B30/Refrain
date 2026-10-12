@@ -67,9 +67,12 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           tar -xzf "refrain-${version}-linux-x86_64.tar.gz"
-          # A GUI needs a display, but the diagnostics do not: this proves the
-          # binary starts and finds the yt-dlp shipped next to it.
-          ./refrain-${version}-linux-x86_64/refrain --probe "daft punk" | head -5
+          # A GUI needs a display, but the checks do not: this proves the binary
+          # starts, talks to YouTube, and finds the yt-dlp shipped beside it.
+          # Output goes to a file rather than a pipe — piping into `head` closes
+          # the pipe early, and `pipefail` would call that a failure.
+          ./refrain-${version}-linux-x86_64/refrain --canary > canary.txt
+          cat canary.txt
 
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
