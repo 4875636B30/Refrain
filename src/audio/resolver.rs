@@ -114,6 +114,51 @@ const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// track that is playing, one being warmed, or a fetch still in flight.
 const CACHE_PROTECT: Duration = Duration::from_secs(10 * 60);
 
+/// How much cached audio is on disk: (tracks, bytes).
+pub fn cache_usage() -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(cache_dir()) else {
+        return (0, 0);
+    };
+    let mut tracks = 0;
+    let mut bytes = 0;
+    for entry in entries.flatten() {
+        if entry.path().extension().is_none_or(|ext| ext != "m4a") {
+            continue;
+        }
+        bytes += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        tracks += 1;
+    }
+    (tracks, bytes)
+}
+
+/// Delete cached audio, keeping one track's file.
+///
+/// The exception matters: deleting the file that is playing would be fine on
+/// Linux (the open handle survives), but it would silently un-cache the track
+/// you are listening to.
+pub fn clear_audio_cache(keep: Option<&str>) -> (usize, u64) {
+    let keep = keep.map(cache_path);
+    let Ok(entries) = std::fs::read_dir(cache_dir()) else {
+        return (0, 0);
+    };
+    let (mut removed, mut freed) = (0usize, 0u64);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "m4a") {
+            continue;
+        }
+        if keep.as_deref() == Some(path.as_path()) {
+            continue;
+        }
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            freed += size;
+        }
+    }
+    (removed, freed)
+}
+
 /// Drop the least recently used cached tracks until the cache fits its budget.
 ///
 /// Returns how many files were removed and how many bytes that freed.

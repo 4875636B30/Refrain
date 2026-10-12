@@ -32,6 +32,7 @@ password to hand over.
 | **Your library** | Thumbs up and down, playlists you can add to, rename, delete or remove tracks from, and an "Up next" queue. |
 | **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
 | **Themes** | Light and dark, persisted in the config. Roboto is bundled, so it looks the same on every desktop. |
+| **Settings** | Theme, sign-in source, cache size and clearing it, and yt-dlp status — all in-app, no config editing. |
 | **Keyboard** | Space, arrows, `Shift`+arrows, `/` and `Esc` — see [shortcuts](#keyboard-shortcuts). |
 
 ## Install
@@ -132,12 +133,12 @@ Working today:
 - Thumbs up / down, playlist editing, shuffle, repeat, "Up next" queue
 - MPRIS media controls, media keys and `playerctl`
 - Light and dark themes, with Roboto bundled rather than assumed
+- An in-app settings window: theme, sign-in refresh, cache size and clearing
 - Feed shelves as sideways-scrolling carousels, as YouTube Music shows them
 - A release bundle with `yt-dlp` shipped beside the binary
 
 Not built yet:
 
-- An in-app settings panel — edit `config.toml` for now
 - Packaging beyond the tarball (no Flatpak, AUR or `.deb` yet)
 
 Known limitations:

@@ -195,6 +195,14 @@ text and Roboto Medium for headings. egui has no concept of font weight, so the
 heavier face is registered as its own family (`roboto-medium`) and headings ask
 for it explicitly through `ui::title`.
 
+Fonts are installed during construction, not on the first frame, and that is
+load-bearing rather than stylistic: `Context::set_fonts` only takes effect on the
+*next* frame, and asking for a family that is not bound yet is a panic in egui,
+not a fallback. Installing them on the first frame meant any heading drawn in
+that same frame — a dialog opened at startup, say — took the process down. It
+survived normal startup only because the first frame happens to draw no
+headings.
+
 Roboto goes *first* in the proportional family and egui's own stack stays behind
 it. That stack carries the emoji and the transport glyphs the UI draws — and, as
 a lesson from a bug where the repeat button looked dead, a glyph that is missing

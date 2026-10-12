@@ -219,6 +219,58 @@ enum Repeat {
     One,
 }
 
+/// Resolve browser cookies in the background and report back on the channel.
+///
+/// `fresh` forces a new extraction instead of reusing the cached jar, which is
+/// what the settings panel's "refresh sign-in" needs.
+fn spawn_auth(
+    rt: &tokio::runtime::Runtime,
+    cfg: Config,
+    tx: Sender<Msg>,
+    ctx: egui::Context,
+    fresh: bool,
+) {
+    rt.spawn(async move {
+        let (lang, country) = Config::locale();
+        let started = std::time::Instant::now();
+        let mut resolved = if fresh {
+            crate::auth::resolve_fresh(&cfg).await
+        } else {
+            crate::auth::resolve(&cfg).await
+        };
+
+        // A reused jar is only trusted if InnerTube still accepts it.
+        let stale = match &resolved {
+            Ok(Some(auth)) => {
+                match crate::ytm::Client::new(&lang, &country, Some(auth.jar.clone())) {
+                    Ok(probe) => !probe.logged_in().await.unwrap_or(false),
+                    Err(_) => false,
+                }
+            }
+            _ => false,
+        };
+        if stale {
+            eprintln!("[auth] cached cookies rejected — re-extracting");
+            if let Ok(Some(fresh)) = crate::auth::resolve_fresh(&cfg).await {
+                resolved = Ok(Some(fresh));
+            }
+        }
+        match &resolved {
+            Ok(Some(auth)) => eprintln!(
+                "[auth] ready in {:?} via {} (session={})",
+                started.elapsed(),
+                auth.source.browser,
+                auth.jar.has_youtube_session()
+            ),
+            Ok(None) => eprintln!("[auth] none in {:?}", started.elapsed()),
+            Err(e) => eprintln!("[auth] failed in {:?}: {e}", started.elapsed()),
+        }
+        let result = resolved.map_err(|e| e.to_string());
+        let _ = tx.send(Msg::Auth(result));
+        ctx.request_repaint();
+    });
+}
+
 /// The user's playlists, as (browse id, title), from the library page.
 ///
 /// "Liked Music" is an auto playlist driven by ratings rather than a real list,
@@ -467,6 +519,9 @@ pub struct App {
     renaming: Option<(String, String)>,
     /// A pending delete: (playlist id, title), waiting for confirmation.
     deleting: Option<(String, String)>,
+    /// Whether the settings window is showing, and what the cache holds.
+    show_settings: bool,
+    cache_usage: (usize, u64),
     /// Desktop media controls, if the desktop has any.
     media: media::Controls,
     /// The track the desktop is currently showing.
@@ -543,6 +598,12 @@ impl App {
             .build()
             .context("building image HTTP client")?;
 
+        // Fonts are installed here rather than on the first frame: `set_fonts`
+        // only takes effect on the *next* frame, so any heading drawn in the
+        // same frame that installs them would ask for a family that does not
+        // exist yet — which egui treats as a panic, not a fallback.
+        ui::install_fonts(&cc.egui_ctx);
+
         let ytdlp = resolver::locate_ytdlp();
         resolver::clean_stale_parts();
         // Enforcing the cache budget walks the whole directory, so keep it off
@@ -581,46 +642,7 @@ impl App {
         }
 
         // Resolve browser cookies off the UI thread so startup stays instant.
-        {
-            let cfg = cfg.clone();
-            let tx = tx.clone();
-            let ctx = cc.egui_ctx.clone();
-            rt.spawn(async move {
-                let (lang, country) = Config::locale();
-                let started = std::time::Instant::now();
-                let mut resolved = crate::auth::resolve(&cfg).await;
-
-                // A reused jar is only trusted if InnerTube still accepts it.
-                let stale = match &resolved {
-                    Ok(Some(auth)) => {
-                        match crate::ytm::Client::new(&lang, &country, Some(auth.jar.clone())) {
-                            Ok(probe) => !probe.logged_in().await.unwrap_or(false),
-                            Err(_) => false,
-                        }
-                    }
-                    _ => false,
-                };
-                if stale {
-                    eprintln!("[auth] cached cookies rejected — re-extracting");
-                    if let Ok(Some(fresh)) = crate::auth::resolve_fresh(&cfg).await {
-                        resolved = Ok(Some(fresh));
-                    }
-                }
-                match &resolved {
-                    Ok(Some(auth)) => eprintln!(
-                        "[auth] ready in {:?} via {} (session={})",
-                        started.elapsed(),
-                        auth.source.browser,
-                        auth.jar.has_youtube_session()
-                    ),
-                    Ok(None) => eprintln!("[auth] none in {:?}", started.elapsed()),
-                    Err(e) => eprintln!("[auth] failed in {:?}: {e}", started.elapsed()),
-                }
-                let result = resolved.map_err(|e| e.to_string());
-                let _ = tx.send(Msg::Auth(result));
-                ctx.request_repaint();
-            });
-        }
+        spawn_auth(&rt, cfg.clone(), tx.clone(), cc.egui_ctx.clone(), false);
 
         // Playback is handled by yt-dlp reading the browser directly, so a
         // previously-discovered source lets it start immediately without
@@ -660,6 +682,8 @@ impl App {
             picker: None,
             renaming: None,
             deleting: None,
+            show_settings: false,
+            cache_usage: (0, 0),
             media,
             media_for: None,
             last_media_push: Instant::now(),
@@ -2113,6 +2137,12 @@ impl App {
                                 self.save_ui_settings();
                                 ui.close();
                             }
+                            if ui.button("⚙  Settings…").clicked() {
+                                // Measure the cache as it opens, not every frame.
+                                self.cache_usage = resolver::cache_usage();
+                                self.show_settings = true;
+                                ui.close();
+                            }
                             ui.separator();
                             ui.label(
                                 RichText::new(if self.authenticated {
@@ -2569,6 +2599,140 @@ impl App {
             });
             ctx.request_repaint();
         });
+    }
+
+    /// The settings window.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let mut theme_changed = false;
+        let mut refresh_auth = false;
+        let mut clear_cache = false;
+
+        egui::Window::new("Settings")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(400.0);
+
+                ui.label(ui::title("Appearance").size(16.0));
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(!self.theme_light, "Dark").clicked() {
+                        self.theme_light = false;
+                        theme_changed = true;
+                    }
+                    if ui.selectable_label(self.theme_light, "Light").clicked() {
+                        self.theme_light = true;
+                        theme_changed = true;
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(ui::title("Sign-in").size(16.0));
+                ui.label(
+                    RichText::new(if self.authenticated {
+                        "Signed in — your library, ratings and playlists are available."
+                    } else {
+                        "Anonymous — search and browsing work; your library needs a signed-in browser."
+                    })
+                    .weak()
+                    .small(),
+                );
+                ui.label(
+                    RichText::new(format!("Source: {}", self.auth.browser))
+                        .weak()
+                        .small(),
+                );
+                if ui
+                    .button("Refresh sign-in")
+                    .on_hover_text("Discard the cached cookies and extract them again")
+                    .clicked()
+                {
+                    refresh_auth = true;
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(ui::title("Storage").size(16.0));
+                let (tracks, bytes) = self.cache_usage;
+                ui.label(
+                    RichText::new(format!(
+                        "{tracks} cached tracks, {:.0} MB on disk",
+                        bytes as f64 / 1e6
+                    ))
+                    .weak()
+                    .small(),
+                );
+                if ui
+                    .button("Clear cached audio")
+                    .on_hover_text("Playback re-resolves anything you play again")
+                    .clicked()
+                {
+                    clear_cache = true;
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(ui::title("Playback").size(16.0));
+                match resolver::locate_ytdlp() {
+                    Some(path) => {
+                        ui.label(
+                            RichText::new(format!("yt-dlp: {}", path.display()))
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(
+                                "yt-dlp not found — playback is disabled. Install it, or set YTDLP_PATH.",
+                            )
+                            .color(ui::WARN)
+                            .small(),
+                        );
+                    }
+                }
+                ui.label(
+                    RichText::new("Streaming also needs a JavaScript runtime (node or deno).")
+                        .weak()
+                        .small(),
+                );
+            });
+
+        if theme_changed {
+            self.theme_applied = false;
+            self.save_ui_settings();
+        }
+        if refresh_auth {
+            crate::auth::clear_cache();
+            self.status = Some("Refreshing sign-in…".to_string());
+            spawn_auth(&self.rt, Config::load(), self.tx.clone(), ctx.clone(), true);
+        }
+        if clear_cache {
+            let keep = self
+                .audio
+                .as_ref()
+                .and_then(|audio| audio.now_playing.as_ref())
+                .map(|track| track.video_id.clone());
+            let (removed, freed) = resolver::clear_audio_cache(keep.as_deref());
+            self.cache_usage = resolver::cache_usage();
+            self.status = Some(format!(
+                "Cleared {removed} cached tracks ({:.0} MB)",
+                freed as f64 / 1e6
+            ));
+        }
+        self.show_settings = open;
     }
 
     /// The rename dialog and the delete confirmation.
@@ -3116,7 +3280,6 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         if !self.theme_applied {
-            ui::install_fonts(&ctx);
             ui::apply_theme(&ctx, self.theme_light);
             self.theme_applied = true;
         }
@@ -3131,6 +3294,7 @@ impl eframe::App for App {
         self.tick_media();
         self.playlist_picker(&ctx);
         self.playlist_dialogs(&ctx);
+        self.settings_window(&ctx);
         self.sidebar(ui, &ctx);
         self.top_bar(ui, &ctx);
         self.bottom_bar(ui, &ctx);
