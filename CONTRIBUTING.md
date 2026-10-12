@@ -51,6 +51,20 @@ cargo test
 All three run in CI, and CI is the gate. `clippy` is set to deny warnings, so a
 warning is a failure.
 
+## Checking the other platforms
+
+CI builds and tests Linux, macOS and Windows, but that takes a round trip. To
+lint another platform's code paths locally, flip the platform gates — the
+Linux-only blocks vanish and the others appear, which is what those targets
+compile:
+
+```sh
+sed -i 's/target_os = "linux"/any()/g; s/not(any())/all()/g' src/*.rs   # then revert
+```
+
+The usual failure this catches is code that is only *used* on Linux becoming
+dead on the others, which `-D warnings` turns into a build failure.
+
 ## How the code is laid out
 
 [`docs/architecture.md`](docs/architecture.md) explains the design and the parts

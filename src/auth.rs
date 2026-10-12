@@ -437,6 +437,7 @@ pub async fn auto_resolve() -> Result<Option<ResolvedAuth>> {
 
 // --------------------------------------------------------------- discovery
 
+#[cfg(target_os = "linux")]
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -473,6 +474,7 @@ fn candidates() -> Vec<(String, PathBuf)> {
     }
 
     // Chromium family: value is the user-data directory.
+    #[cfg(target_os = "linux")]
     let chromium = [
         (
             "brave",
@@ -499,6 +501,7 @@ fn candidates() -> Vec<(String, PathBuf)> {
 }
 
 /// Read `profiles.ini` and return the default profile's absolute path.
+#[cfg(target_os = "linux")]
 fn firefox_default_profile(base: &std::path::Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(base.join("profiles.ini")).ok()?;
     let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
