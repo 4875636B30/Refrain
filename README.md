@@ -50,9 +50,9 @@ chmod +x refrain-*-x86_64.AppImage
 ./refrain-*-x86_64.AppImage
 ```
 
-It carries `yt-dlp` inside, so playback works without installing anything else
-(you still need a JavaScript runtime — `node` or `deno` — and `ffmpeg` for the
-fallback path).
+It carries `yt-dlp` and QuickJS inside, so playback works without installing
+anything else. `ffmpeg` is still needed, but only for the fallback path that
+transcodes a stream the fast path could not use.
 
 ### macOS
 
@@ -110,10 +110,12 @@ cargo run --release
   one is used instead: yt-dlp is the part that breaks when YouTube changes, so
   a stale bundled copy would otherwise take playback down with it. Settings
   shows which copy is in use and how old it is.
-- **A JavaScript runtime** — `node`, `deno` or `quickjs` on `PATH`, or beside the
-  executable. `yt-dlp` needs one to solve YouTube's JS challenges, and Refrain
-  passes `--js-runtimes` for you. QuickJS is the smallest by far (about 1 MB
-  against Node's 50), and the Flatpak bundles it.
+- **A JavaScript runtime** — **not needed for a downloaded build**: every
+  release carries QuickJS beside the executable, which is what yt-dlp uses to
+  solve YouTube's JS challenges. Building from source, or installing from a
+  package manager that does not bundle one, means supplying your own: `node`,
+  `deno` or `quickjs`, on `PATH` or beside the executable. Refrain passes
+  `--js-runtimes` for you.
 - **`ffmpeg`** — only for the download fallback.
 - **A signed-in browser** for your library and reliable playback. Anonymous
   playback is bot-blocked for much of the catalogue.

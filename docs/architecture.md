@@ -337,9 +337,12 @@ is a challenge error that says nothing about the cause. It accepts `deno`, `node
 runtime **beside its own executable wins over anything on `PATH`**.
 
 That lookup order is what makes a bundle self-sufficient without bundling Node:
-QuickJS is about 1 MB against Node's 50, and the Flatpak manifest builds it from
-source. It is also why the runtime is worth *naming* in diagnostics — `--canary`
-reports which one was found, and fails when there is none.
+QuickJS is about 2 MB against Node's 50, and every release carries one —
+quickjs-ng publishes prebuilt binaries for all three platforms, so it is a
+download rather than a build. The Flatpak manifest builds it from source for the
+same reason. It is also why the runtime is worth *naming* in diagnostics:
+`--canary` reports which one was found, and fails when there is none, which is
+what keeps a release from shipping without one.
 
 ## Packaging
 

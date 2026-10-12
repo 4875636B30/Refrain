@@ -59,6 +59,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.2" date="2026-10-13">
+      <description>
+        <p>Downloads carry QuickJS, so playback no longer needs a JavaScript
+           runtime installed.</p>
+        <p>A cookies file can be picked in the app, which is how signing in
+           works where reading a browser's store is not possible.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-12">
       <description>
         <p>Packaged as an AppImage as well as a tarball.</p>

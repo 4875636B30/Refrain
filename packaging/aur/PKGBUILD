@@ -24,9 +24,9 @@ depends=(
   'yt-dlp'
 )
 optdepends=(
-  "nodejs: JavaScript runtime yt-dlp needs to solve YouTube's challenges — playback fails without one"
+  "quickjs-ng: JavaScript runtime yt-dlp needs to solve YouTube's challenges — playback fails without one, and this is the small one"
+  'nodejs: alternative JavaScript runtime'
   'deno: alternative JavaScript runtime'
-  'quickjs: alternative JavaScript runtime, far smaller than nodejs'
   'ffmpeg: transcodes a stream the fast path could not use'
 )
 

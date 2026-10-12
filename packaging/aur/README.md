@@ -24,7 +24,7 @@ the maintainer named in the PKGBUILD.
 git clone ssh://aur@aur.archlinux.org/refrain-bin.git
 cp PKGBUILD .SRCINFO refrain-music-bin/
 cd refrain-music-bin && git add PKGBUILD .SRCINFO
-git commit -m "Initial import: refrain-bin 0.1.1"
+git commit -m "Initial import: refrain-music-bin 0.1.2"
 git push
 ```
 
@@ -50,6 +50,10 @@ does not mention them: without them there is no window.
 
 yt-dlp cannot solve YouTube's challenges without a JavaScript runtime, and
 without one playback fails. It is an `optdepends` rather than a `depends`
-because there is a choice — `nodejs`, `deno`, or `quickjs` (which is a fraction
-of the size and works just as well) — and hard-depending on one of them would
-drag Node onto systems that already have another.
+because there is a choice — `quickjs-ng` (the small one, and first in the list),
+`nodejs` or `deno` — and hard-depending on one would drag Node onto systems that
+already have another.
+
+The release tarball *does* carry a QuickJS beside the binary, but this package
+installs only the binary: putting a private `qjs` in `/usr/bin` would be rude,
+and Arch packages the real thing.

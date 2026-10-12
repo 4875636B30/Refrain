@@ -49,6 +49,19 @@ jobs:
           chmod +x yt-dlp_linux
           ./yt-dlp_linux --version
 
+      # yt-dlp cannot solve YouTube's challenges without a JavaScript runtime,
+      # and without one playback fails. Bundled rather than left as a
+      # prerequisite: QuickJS is a couple of megabytes, against asking every
+      # user to install Node. The client looks for a runtime beside its own
+      # executable first, so this one is picked up with no configuration.
+      - name: Fetch QuickJS
+        run: |
+          set -euo pipefail
+          curl -fsSL -o qjs \
+            https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/qjs-linux-x86_64
+          chmod +x qjs
+          ./qjs -e 'console.log("quickjs ok")'
+
       - name: Assemble the bundle
         run: |
           set -euo pipefail
@@ -57,6 +70,7 @@ jobs:
           mkdir -p "dist/${name}"
           cp target/release/refrain "dist/${name}/"
           cp yt-dlp_linux "dist/${name}/"
+          cp qjs "dist/${name}/"
           cp packaging/refrain.desktop packaging/refrain.metainfo.xml \
              packaging/refrain.svg "dist/${name}/"
           cp README.md LICENSE "dist/${name}/"
@@ -75,6 +89,7 @@ jobs:
           cp target/release/refrain AppDir/usr/bin/
           # Beside the binary is where the resolver looks for it.
           cp yt-dlp_linux AppDir/usr/bin/
+          cp qjs AppDir/usr/bin/
           cp packaging/refrain.desktop AppDir/
           cp packaging/refrain.svg AppDir/
           cp packaging/refrain.svg AppDir/.DirIcon
@@ -149,6 +164,18 @@ jobs:
           chmod +x yt-dlp_macos
           ./yt-dlp_macos --version
 
+      - name: Fetch QuickJS
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) asset=qjs-darwin-arm64 ;;
+            x86_64-apple-darwin)  asset=qjs-darwin-x86_64 ;;
+          esac
+          curl -fsSL -o qjs \
+            "https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/$asset"
+          chmod +x qjs
+          ./qjs -e 'console.log("quickjs ok")'
+
       # A .app rather than a bare binary, so it can be double-clicked. yt-dlp
       # goes in Contents/MacOS beside the executable, which is where the
       # resolver looks.
@@ -162,6 +189,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/$arch/release/refrain" "$app/Contents/MacOS/"
           cp yt-dlp_macos "$app/Contents/MacOS/"
+          cp qjs "$app/Contents/MacOS/"
           cp packaging/refrain.icns "$app/Contents/Resources/"
           cp README.md LICENSE "$app/Contents/"
 
@@ -230,6 +258,14 @@ jobs:
           Invoke-WebRequest -Uri https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -OutFile yt-dlp.exe
           .\yt-dlp.exe --version
 
+      - name: Fetch QuickJS
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/qjs-windows-x86_64.exe" -OutFile qjs.exe
+          # Named `qjs.exe` deliberately: that is what the client looks for
+          # beside its own executable.
+          .\qjs.exe -e 'console.log("quickjs ok")'
+
       - name: Assemble the bundle
         shell: pwsh
         run: |
@@ -239,6 +275,7 @@ jobs:
           Copy-Item target/release/refrain.exe $name
           # Beside the binary is where the resolver looks for it.
           Copy-Item yt-dlp.exe $name
+          Copy-Item qjs.exe $name
           Copy-Item README.md, LICENSE $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
@@ -293,6 +330,8 @@ jobs:
             until you allow it — right-click, *Open*, then confirm — and Windows
             SmartScreen will ask before running an unknown publisher's `.exe`.
 
-            You still need a **JavaScript runtime** (`node` or `deno`) for
-            playback, and `ffmpeg` for the fallback path that transcodes a stream
-            the fast path could not use.
+            Playback needs no JavaScript runtime installed: each of these
+            carries **QuickJS** beside the executable, which is what yt-dlp uses
+            to solve YouTube's challenges. `ffmpeg` is still needed, but only for
+            the fallback path that transcodes a stream the fast path could not
+            use.
