@@ -8,6 +8,14 @@ readme = "README.md"
 keywords = ["music", "youtube", "egui", "audio", "player"]
 categories = ["multimedia::audio", "gui"]
 
+# Shipping profile. `strip` matters more than it looks: an unstripped release
+# binary was 41 MB, and its text and rodata are mapped into every running
+# process, so it costs resident memory as well as download size.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 anyhow = "1.0.104"
 directories = "6.0.0"

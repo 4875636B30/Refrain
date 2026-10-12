@@ -125,6 +125,9 @@ than delete something in use.
 
 - Artwork is decoded to at most 160 px and cached with a bounded LRU, so browsing
   large feeds doesn't grow memory without limit.
+- The release profile strips symbols and uses thin LTO. An unstripped binary was
+  41 MB and its text and rodata are mapped into every running process, so it cost
+  resident memory as well as download size; stripped and LTO'd it is 29 MB.
 - Media is written to disk in bounded 16 MB chunks as it arrives, rather than
   being buffered whole in memory.
 - Streams are read from `yt-dlp`'s stdout into memory as needed, and at most a
