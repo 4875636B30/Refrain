@@ -55,6 +55,15 @@ pub enum Outcome {
     Saved(PathBuf, String),
 }
 
+/// Lowercase hex, for a hash digest.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Compare two version strings, ignoring a leading `v`.
 ///
 /// Numeric per component, so 0.1.10 is newer than 0.1.9 — which a string
@@ -202,24 +211,72 @@ pub async fn check(http: &reqwest::Client, current: &str) -> Result<Option<Relea
     }))
 }
 
+/// Download `release` into `dir`, hashing it as it arrives.
+///
+/// Streamed to a file rather than read into memory: a release is tens of
+/// megabytes, and holding it once in the response and again in the staging file
+/// is the largest thing this app ever allocates. Hashing on the way in means
+/// the file is written once and read once, and the peak stays at one chunk.
+async fn download_to(
+    http: &reqwest::Client,
+    release: &Release,
+    dir: &Path,
+) -> Result<(PathBuf, String), String> {
+    let mut response = http
+        .get(&release.asset_url)
+        .send()
+        .await
+        .map_err(|e| format!("could not download {}: {e}", release.asset_name))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "downloading {} failed ({})",
+            release.asset_name,
+            response.status()
+        ));
+    }
+    use sha2::Digest as _;
+    let path = dir.join(format!(".{}.part", release.asset_name));
+    let mut file = std::fs::File::create(&path)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(format!("could not download {}: {e}", release.asset_name));
+            }
+        };
+        let Some(chunk) = chunk else { break };
+        hasher.update(&chunk);
+        if let Err(e) = std::io::Write::write_all(&mut file, &chunk) {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!("could not write {}: {e}", path.display()));
+        }
+    }
+    drop(file);
+    Ok((path, hex_digest(hasher.finalize())))
+}
+
 /// Download `release` and, where it is safe, put it in place.
 pub async fn install(
     http: &reqwest::Client,
     release: &Release,
     kind: &InstallKind,
 ) -> Result<Outcome, String> {
-    let bytes = http
-        .get(&release.asset_url)
-        .send()
-        .await
-        .map_err(|e| format!("could not download {}: {e}", release.asset_name))?
-        .bytes()
-        .await
-        .map_err(|e| format!("could not download {}: {e}", release.asset_name))?;
+    // Stage beside the destination, so putting it in place is a rename rather
+    // than a copy across filesystems.
+    let dir = match kind {
+        InstallKind::AppImage(target) => target.parent().map(Path::to_path_buf),
+        InstallKind::Bundle(dir) => Some(dir.clone()),
+        InstallKind::Managed | InstallKind::Download => download_dir(),
+    };
+    let dir = dir.ok_or("nowhere to put the download")?;
+    let (staged, actual) = download_to(http, release, &dir).await?;
 
     // The checksum is what makes this safe to do unattended, so it is required.
     let Some(checksum_url) = &release.checksum_url else {
-        let path = save_to_downloads(&release.asset_name, &bytes)?;
+        let path = keep_download(&staged, &release.asset_name)?;
         return Ok(Outcome::Saved(
             path,
             "this release publishes no checksum, so it was downloaded rather than installed"
@@ -239,41 +296,41 @@ pub async fn install(
         .next()
         .unwrap_or_default()
         .to_lowercase();
-    let actual = sha256_hex(&bytes);
     if expected.is_empty() || expected != actual {
+        let _ = std::fs::remove_file(&staged);
         return Err("the download does not match its published checksum".to_string());
     }
 
     match kind {
         InstallKind::AppImage(target) => {
-            write_atomically(target, &bytes)?;
+            std::fs::rename(&staged, target)
+                .map_err(|e| format!("could not replace {}: {e}", target.display()))?;
             make_executable(target);
             Ok(Outcome::Replaced)
         }
-        InstallKind::Bundle(dir) => {
-            let staging = temp_dir(dir)?;
-            unpack(&release.asset_name, &bytes, &staging)?;
-            let root = single_directory(&staging).unwrap_or(staging.clone());
+        InstallKind::Bundle(bundle) => {
+            let unpacked = unpack_beside(&release.asset_name, &staged, bundle)?;
             let mut replaced = Vec::new();
             for name in ["refrain", "yt-dlp_linux", "qjs"] {
-                let from = root.join(name);
+                let from = unpacked.join(name);
                 if from.is_file() {
-                    let to = dir.join(name);
-                    write_atomically(&to, &std::fs::read(&from).map_err(|e| e.to_string())?)?;
+                    let to = bundle.join(name);
+                    copy_atomically(&from, &to)?;
                     if name == "refrain" {
                         make_executable(&to);
                     }
                     replaced.push(name.to_string());
                 }
             }
-            let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_file(&staged);
+            let _ = std::fs::remove_dir_all(&unpacked);
             if replaced.is_empty() {
                 return Err("the download did not contain anything to install".to_string());
             }
             Ok(Outcome::Replaced)
         }
         InstallKind::Managed | InstallKind::Download => {
-            let path = save_to_downloads(&release.asset_name, &bytes)?;
+            let path = keep_download(&staged, &release.asset_name)?;
             Ok(Outcome::Saved(
                 path,
                 "this copy is not one the app may replace, so it was downloaded instead"
@@ -283,42 +340,65 @@ pub async fn install(
     }
 }
 
-/// Where a download goes when it cannot be installed in place.
-fn save_to_downloads(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let dir = directories::UserDirs::new()
-        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
-        .filter(|dir| dir.is_dir())
-        .unwrap_or_else(std::env::temp_dir);
+/// Move a staged download to its final name, in the same directory.
+fn keep_download(staged: &Path, name: &str) -> Result<PathBuf, String> {
+    let Some(dir) = staged.parent() else {
+        return Err("the download has no directory".to_string());
+    };
     let path = dir.join(name);
-    std::fs::write(&path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    std::fs::rename(staged, &path)
+        .map_err(|e| format!("could not save {}: {e}", path.display()))?;
     Ok(path)
 }
 
-/// Write through a temporary file in the same directory, so the replacement is
-/// atomic: an interrupted write leaves the old file in place, not half a new one.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let Some(dir) = path.parent() else {
-        return Err(format!("{} has no directory", path.display()));
+fn download_dir() -> Option<PathBuf> {
+    directories::UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+        .filter(|dir| dir.is_dir())
+        .or_else(|| Some(std::env::temp_dir()))
+}
+
+/// Unpack a release tarball into a directory beside the install, so the files
+/// it replaces stay on one filesystem.
+fn unpack_beside(name: &str, archive: &Path, beside: &Path) -> Result<PathBuf, String> {
+    if !name.ends_with(".tar.gz") {
+        return Err(format!("do not know how to unpack {name}"));
+    }
+    let dir = beside.join(".refrain-update");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let file = std::fs::File::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    tar::Archive::new(decoder)
+        .unpack(&dir)
+        .map_err(|e| format!("could not unpack the download: {e}"))?;
+    // Release tarballs hold one directory; flatten it.
+    Ok(single_directory(&dir).unwrap_or_else(|| dir.clone()))
+}
+
+/// Copy a file into place through a temporary beside it, so an interrupted
+/// copy leaves the old file rather than half a new one.
+fn copy_atomically(from: &Path, to: &Path) -> Result<(), String> {
+    let Some(dir) = to.parent() else {
+        return Err(format!("{} has no directory", to.display()));
     };
     let staging = dir.join(format!(
         ".{}.new",
-        path.file_name()
-            .and_then(|n| n.to_str())
+        to.file_name()
+            .and_then(|name| name.to_str())
             .unwrap_or("refrain")
     ));
-    std::fs::write(&staging, bytes)
+    std::fs::copy(from, &staging)
         .map_err(|e| format!("could not write {}: {e}", staging.display()))?;
-    // Copy the old permissions across before the rename, so the replacement is
-    // executable where the original was.
-    if let Ok(meta) = std::fs::metadata(path) {
+    if let Ok(meta) = std::fs::metadata(to) {
         let _ = std::fs::set_permissions(&staging, meta.permissions());
     }
-    std::fs::rename(&staging, path).map_err(|e| {
+    std::fs::rename(&staging, to).map_err(|e| {
         let _ = std::fs::remove_file(&staging);
-        format!("could not replace {}: {e}", path.display())
+        format!("could not replace {}: {e}", to.display())
     })
 }
-
 #[cfg(unix)]
 fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -331,28 +411,6 @@ fn make_executable(path: &Path) {
 
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) {}
-
-/// A directory to unpack into, beside the target so the final rename stays on
-/// one filesystem.
-fn temp_dir(beside: &Path) -> Result<PathBuf, String> {
-    let dir = beside.join(".refrain-update");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-fn unpack(name: &str, bytes: &[u8], into: &Path) -> Result<(), String> {
-    if name.ends_with(".tar.gz") {
-        let decoder = flate2::read::GzDecoder::new(bytes);
-        tar::Archive::new(decoder)
-            .unpack(into)
-            .map_err(|e| format!("could not unpack the download: {e}"))?;
-        return Ok(());
-    }
-    Err(format!("do not know how to unpack {name}"))
-}
-
 /// The single top-level directory a release tarball contains.
 fn single_directory(dir: &Path) -> Option<PathBuf> {
     let mut entries = std::fs::read_dir(dir).ok()?.flatten();
@@ -362,17 +420,6 @@ fn single_directory(dir: &Path) -> Option<PathBuf> {
     }
     let path = first.path();
     path.is_dir().then_some(path)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -548,9 +595,12 @@ mod tests {
 
     #[test]
     fn the_checksum_is_the_published_one() {
+        use sha2::Digest as _;
         // sha256 of "abc", from any reference table.
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"abc");
         assert_eq!(
-            sha256_hex(b"abc"),
+            hex_digest(hasher.finalize()),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }

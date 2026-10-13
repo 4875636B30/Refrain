@@ -6,17 +6,23 @@
 
 use anyhow::Result;
 
-/// Longest edge we keep after decoding. Artwork is shown at ≤64px in lists and
-/// ≤160px in headers, so decoding larger only wastes memory.
-const MAX_EDGE: u32 = 160;
+/// Longest edge we keep after decoding.
+///
+/// Artwork is shown at ~56px in lists and up to 160px in headers, and a texture
+/// costs `edge² × 4` bytes: 160px is 102 KB, 56px is 12. Rows outnumber covers
+/// many times over, so decoding everything at the largest size wasted most of
+/// the app's own memory. Callers now say what they will draw at.
+pub const MAX_EDGE: u32 = 160;
 
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
 
 /// Fetch raw image bytes.
-pub async fn fetch(client: &reqwest::Client, uri: &str) -> Result<Vec<u8>> {
+pub async fn fetch(client: &reqwest::Client, uri: &str) -> Result<bytes::Bytes> {
     let response = client.get(uri).send().await?.error_for_status()?;
-    Ok(response.bytes().await?.to_vec())
+    // Returned as it arrives: `to_vec()` here copied every image a second time
+    // for no reason, since the decoder only borrows it.
+    Ok(response.bytes().await?)
 }
 
 /// Decode image bytes into an egui image.
@@ -24,7 +30,8 @@ pub async fn fetch(client: &reqwest::Client, uri: &str) -> Result<Vec<u8>> {
 /// Artwork is centre-cropped to a square and downscaled. Cropping at decode
 /// time means every tile gets an identical square texture, so grids line up —
 /// YouTube serves a mix of square covers and 16:9 video stills.
-pub fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
+pub fn decode(bytes: &[u8], edge: u32) -> Option<egui::ColorImage> {
+    let edge = edge.clamp(16, MAX_EDGE);
     let image = image::load_from_memory(bytes).ok()?;
     let (width, height) = (image.width(), image.height());
     let side = width.min(height);
@@ -33,8 +40,8 @@ pub fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
     } else {
         image.crop_imm((width - side) / 2, (height - side) / 2, side, side)
     };
-    let image = if side > MAX_EDGE {
-        image.thumbnail(MAX_EDGE, MAX_EDGE)
+    let image = if side > edge {
+        image.thumbnail(edge, edge)
     } else {
         image
     };
@@ -65,7 +72,7 @@ mod tests {
             )
             .expect("encoding test JPEG");
 
-        let decoded = decode(&bytes).expect("decoding test JPEG");
+        let decoded = decode(&bytes, MAX_EDGE).expect("decoding test JPEG");
         assert_eq!(decoded.size, [64, 64]);
         assert_eq!(decoded.pixels.len(), 64 * 64);
 
@@ -74,9 +81,37 @@ mod tests {
         assert_eq!(handle.size(), [64, 64]);
     }
 
+    /// The point of the size argument: a texture costs `edge² × 4` bytes, and
+    /// rows outnumber covers, so decoding everything at 160px wasted most of
+    /// the app's own memory. 160px is 100 KB; 64px is 16.
+    #[test]
+    fn decodes_at_the_size_it_will_be_drawn() {
+        let source = image::RgbImage::from_fn(512, 512, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        let mut bytes = Vec::new();
+        source
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encoding test PNG");
+
+        let big = decode(&bytes, 160).expect("160px");
+        let small = decode(&bytes, 64).expect("64px");
+        assert_eq!(big.size, [160, 160]);
+        assert_eq!(small.size, [64, 64]);
+        let big_bytes = big.size[0] * big.size[1] * 4;
+        let small_bytes = small.size[0] * small.size[1] * 4;
+        assert!(
+            big_bytes > small_bytes * 5,
+            "160px is {big_bytes} bytes, 64px is {small_bytes}"
+        );
+    }
+
     #[test]
     fn rejects_garbage() {
-        assert!(decode(b"definitely not an image").is_none());
+        assert!(decode(b"definitely not an image", MAX_EDGE).is_none());
     }
 
     /// Non-square artwork (e.g. 16:9 video stills) must come back square so
@@ -92,7 +127,7 @@ mod tests {
             )
             .expect("encoding test PNG");
 
-        let decoded = decode(&bytes).expect("decoding test PNG");
+        let decoded = decode(&bytes, MAX_EDGE).expect("decoding test PNG");
         assert_eq!(decoded.size, [40, 40]);
     }
 }

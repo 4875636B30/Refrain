@@ -78,6 +78,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.13" date="2026-10-13">
+      <description>
+        <p>Updates download to disk instead of into memory: a 52 MB release
+           used to peak at 125 MB, and now peaks at 19.</p>
+        <p>Artwork is decoded at the size it is drawn rather than always at the
+           largest, which cuts the memory a row of cover art costs by six.</p>
+      </description>
+    </release>
     <release version="0.1.12" date="2026-10-13">
       <description>
         <p>The playing row's equaliser animates at the frame rate the platform

@@ -636,7 +636,10 @@ pub fn draw_thumbnail(
         return;
     };
 
-    match thumbs.get(uri) {
+    // The texture is decoded for the size it is drawn at, so the key says which.
+    let key = thumbnail_key(uri, size.x.max(size.y).ceil() as u32);
+
+    match thumbs.get(&key) {
         Some(texture) => {
             let response = ui.add(
                 egui::Image::from_texture(texture)
@@ -644,7 +647,7 @@ pub fn draw_thumbnail(
                     .corner_radius(radius),
             );
             if ui.is_rect_visible(response.rect) {
-                mark_visible(ui, uri);
+                mark_visible(ui, &key);
             }
         }
         None => {
@@ -655,10 +658,20 @@ pub fn draw_thumbnail(
             // needs fetching. This is also what bootstraps the very first
             // frame, when nothing has been drawn and so nothing is visible yet.
             if ui.is_rect_visible(rect) {
-                mark_visible(ui, uri);
+                mark_visible(ui, &key);
             }
         }
     }
+}
+
+/// The cache key for a piece of artwork at a given size.
+///
+/// One image is often wanted at two sizes — a cover is a 56px row tile and a
+/// 160px header — and they are different textures, so the size belongs in the
+/// key. Rounded to 16px steps so a couple of pixels' difference does not fetch
+/// and decode the same picture twice.
+pub fn thumbnail_key(uri: &str, edge: u32) -> String {
+    format!("{}@{uri}", edge.div_ceil(16) * 16)
 }
 
 /// What happened when a list row was drawn.

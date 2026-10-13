@@ -2338,6 +2338,13 @@ impl App {
             if self.thumbnails.contains_key(&uri) || self.thumb_failed.contains(&uri) {
                 continue;
             }
+            // The key carries the size: "160@https://…". Fetching wants the
+            // URL; decoding wants the size, so the texture costs what it is
+            // drawn at rather than always the largest.
+            let (edge, url) = match uri.split_once('@') {
+                Some((edge, url)) => (edge.parse::<u32>().unwrap_or(160), url.to_string()),
+                None => (160, uri.clone()),
+            };
             if !self.thumb_inflight.insert(uri.clone()) {
                 continue; // already in flight
             }
@@ -2347,8 +2354,8 @@ impl App {
             self.rt.spawn(async move {
                 // Decoding is CPU-heavy, so keep it off the UI thread (and off
                 // the async workers) to avoid freezing the window.
-                let result = match thumbs::fetch(&http, &uri).await {
-                    Ok(bytes) => tokio::task::spawn_blocking(move || thumbs::decode(&bytes))
+                let result = match thumbs::fetch(&http, &url).await {
+                    Ok(bytes) => tokio::task::spawn_blocking(move || thumbs::decode(&bytes, edge))
                         .await
                         .ok()
                         .flatten()

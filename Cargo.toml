@@ -1,6 +1,6 @@
 [package]
 name = "refrain"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 description = "A fast, low-memory desktop client for YouTube Music"
 license = "MIT"
@@ -19,6 +19,8 @@ codegen-units = 1
 
 [dependencies]
 anyhow = "1.0.104"
+# reqwest hands back `Bytes`; naming it avoids copying every image again.
+bytes = "1"
 directories = "6.0.0"
 eframe = "0.36.2"
 egui = "0.36.2"

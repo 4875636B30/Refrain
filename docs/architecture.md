@@ -197,6 +197,28 @@ back if the script has already navigated away.
 
 ## Memory
 
+Measured on a release build with the feed loaded and a track playing: about
+200 MB resident, which sounds like a lot until it is broken down.
+
+- **85 MB is shared** — the graphics stack: the NVIDIA driver and its shader
+  compiler, plus LLVM. Shared with every other process using them, and not
+  memory the app can give back.
+- **39 MB is private but file-backed** — the binary's own code and read-only
+  data. Evictable under pressure.
+- **~75 MB is private and dirty** — the driver's host-side copies of uploaded
+  textures, and a Rust heap of about **18 MB**.
+
+So the heap is the small part, and the two things worth changing were not in
+it:
+
+- **The updater** read a whole release into memory and then copied it into the
+  staging file. Measured: 125 MB peak for a 52 MB download. It streams to disk
+  and hashes as it arrives now — **19 MB**, and quicker with it.
+- **Artwork** was decoded at 160px whatever it was drawn at, so a 56px row tile
+  cost 100 KB instead of 12. Rows outnumber covers many times over and the
+  cache holds 200 textures, so the ceiling went from 20 MB of artwork to a few.
+
+
 Measured on a release build with the home feed loaded: **~205 MB resident**,
 steady rather than creeping. Of that, roughly 83 MB is *shared* — the NVIDIA
 driver and `libLLVM`, mapped by every process that touches them — and the bulk

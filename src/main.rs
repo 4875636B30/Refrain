@@ -421,7 +421,7 @@ fn thumb_cmd(url: &str) -> anyhow::Result<()> {
         .user_agent(thumbs::USER_AGENT)
         .build()?;
     let bytes = rt.block_on(thumbs::fetch(&client, url))?;
-    match thumbs::decode(&bytes) {
+    match thumbs::decode(&bytes, thumbs::MAX_EDGE) {
         Some(image) => {
             println!(
                 "fetched {} bytes -> decoded {}x{} ({} px)",
