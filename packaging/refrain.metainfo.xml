@@ -78,6 +78,17 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.18" date="2026-10-14">
+      <description>
+        <p>The queue can be edited: play next, add to queue, move an entry up or
+           down, and remove one. It used to be a list you could look at and
+           click, and nothing else.</p>
+        <p>Starting up no longer re-extracts browser cookies when there is no
+           YouTube session to find. That extraction drives yt-dlp to fetch a
+           video just to dump the cookies, and it was being paid on every launch
+           before the first frame — measured at 12 seconds here, and 0.6 now.</p>
+      </description>
+    </release>
     <release version="0.1.17" date="2026-10-13">
       <description>
         <p>Playback dropouts are reported rather than handled in silence: the
