@@ -14,8 +14,59 @@ mod ui;
 mod update;
 mod ytm;
 
+/// Every option the dispatcher above knows about, for the typo warning.
+const KNOWN_FLAGS: [&str; 19] = [
+    "--auth-check",
+    "--canary",
+    "--decode",
+    "--demo",
+    "--download",
+    "--fps",
+    "--help",
+    "--like-status",
+    "--page",
+    "--play-local",
+    "--play-test",
+    "--probe",
+    "--refresh",
+    "--search",
+    "--stream",
+    "--thumb",
+    "--version",
+    "-V",
+    "-h",
+];
+
+const USAGE: &str = "Refrain — a desktop client for YouTube Music.
+
+  refrain                      open the app
+  refrain --demo               run the scripted demo
+  refrain --fps                print the frame rate the platform delivers
+  refrain --canary             check yt-dlp, the JavaScript runtime and the API
+  refrain --play-test <id>     play a track muted, and assert that it plays
+  refrain --stream <id>        stream a track and report time to first audio
+  refrain --play-local <path>  play a local file muted (device versus stream)
+  refrain --auth-check         report where the session comes from
+  refrain --search <query>     print parsed search results in order
+  refrain --thumb <url>        fetch and decode artwork
+  refrain --page <id>          dump a detail page's tracks and shelves
+  refrain --like-status <id>   read the rating YouTube holds for a track
+  refrain --decode <path>      check that rodio can decode an audio file
+  refrain --probe <query>      exercise the InnerTube client without a window
+  refrain --version            print the version
+  refrain --help               this list
+";
+
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // `--help` lists the diagnostics. There are enough of them now that
+    // guessing is unreasonable, and a mistyped one used to open the window
+    // instead of saying so.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return Ok(());
+    }
 
     // `--canary` checks the things that break silently, for CI to run on a
     // schedule: see the workflow for why.
@@ -193,6 +244,15 @@ fn main() -> eframe::Result<()> {
         .expect("the app icon is embedded in the binary")
         .to_rgba8();
     let (width, height) = icon.dimensions();
+
+    // Anything left that looks like a flag is a typo, and opening a window in
+    // silence is a poor way to say so. Only a warning: the bare command is the
+    // app, and someone who typed a flag they half-remembered probably wants it.
+    for arg in args.iter().skip(1).filter(|arg| arg.starts_with("--")) {
+        if !KNOWN_FLAGS.contains(&arg.as_str()) {
+            eprintln!("unknown option {arg} — try --help");
+        }
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
