@@ -342,13 +342,20 @@ pub fn clear_cache() {
 /// Resolve cookies according to the config, reusing a recent extraction.
 pub async fn resolve(config: &Config) -> Result<Option<ResolvedAuth>> {
     // Fast path: a fresh jar plus a remembered source means no yt-dlp at all.
+    //
+    // Only a jar that carries a real session is reused that way. A jar without
+    // one is anonymous, and reusing it is exactly how the app stopped noticing
+    // that the user had signed in since: the cached jar kept saying "no
+    // session" until it expired, so sign-in appeared to have stopped working.
+    // Searching instead costs a few seconds of yt-dlp, in the background, and
+    // only when there is no session to use.
     if !matches!(config.auth.mode, AuthMode::None | AuthMode::File)
         && let (Some(source), Some(cookies)) = (cached_source(), cached_cookies())
     {
-        return Ok(Some(ResolvedAuth {
-            source,
-            jar: CookieJar::new(cookies),
-        }));
+        let jar = CookieJar::new(cookies);
+        if jar.has_youtube_session() {
+            return Ok(Some(ResolvedAuth { source, jar }));
+        }
     }
     resolve_uncached(config).await
 }

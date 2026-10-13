@@ -78,6 +78,15 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.19" date="2026-10-14">
+      <description>
+        <p>Signing in is picked up again. A cached cookie jar with no YouTube
+           session was being reused as-is, so a browser signed in since the last
+           extraction went unnoticed until the cache expired — and the previous
+           release stopped searching in that case, which made it look as though
+           automatic sign-in had broken.</p>
+      </description>
+    </release>
     <release version="0.1.18" date="2026-10-14">
       <description>
         <p>The queue can be edited: play next, add to queue, move an entry up or
