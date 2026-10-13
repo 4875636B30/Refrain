@@ -307,6 +307,14 @@ fn play_local_cmd(path: &str) -> anyhow::Result<()> {
         engine.position(),
         engine.total
     );
+    // A playback check that works anywhere, with no display: this is what says
+    // the audio path is alive on a machine the app has never run on.
+    if !engine.is_playing() {
+        anyhow::bail!(
+            "three seconds in, playback does not report as playing (position {:?})",
+            engine.position()
+        );
+    }
     engine.stop();
     Ok(())
 }

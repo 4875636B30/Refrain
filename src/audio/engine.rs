@@ -120,6 +120,15 @@ impl AudioEngine {
         self.total = None;
     }
 
+    /// Whether audio is coming out right now: a track is loaded, it is not
+    /// paused, and it has not reached its end.
+    ///
+    /// `Player::empty()` looks like the wrong question — it asks how many
+    /// sources are queued, which for a single appended source might mean
+    /// "already taken by the audio thread". It does not: rodio wraps every
+    /// appended source in `Done`, which decrements that count when the source
+    /// *finishes*. So `empty()` is true exactly when nothing is still playing,
+    /// and the three states agree with each other.
     pub fn is_playing(&self) -> bool {
         self.player
             .as_ref()
@@ -127,6 +136,9 @@ impl AudioEngine {
             .unwrap_or(false)
     }
 
+    /// Whether playback is held, whatever is loaded. Kept separate from
+    /// [`Self::is_playing`] because a paused track is still the current one —
+    /// the row keeps its marker and the bars simply stop moving.
     pub fn is_paused(&self) -> bool {
         self.player.as_ref().map(|p| p.is_paused()).unwrap_or(false)
     }

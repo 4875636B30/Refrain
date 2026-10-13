@@ -4420,12 +4420,12 @@ impl eframe::App for App {
         // stutter; thirty is enough to look like an animation. It costs a
         // little while something is playing and nothing at all otherwise,
         // since a paused player holds its bars still.
-        // "A track is loaded and not paused" rather than `is_playing()`: that
-        // one is built on rodio's `Player::empty()`, which asks how many
-        // sources are *queued* — and a single appended source leaves the queue
-        // the moment the audio thread picks it up, so it reads as empty while
-        // it is still playing. Depending on it here means the animation's frame
-        // rate falls to whatever else happens to wake the app.
+        // "A track is loaded and not paused", rather than `is_playing()`, so
+        // the frame rate does not drop in the gap between a track ending and
+        // the next one starting — `is_playing()` goes false at the end, and the
+        // advance is a moment after that. (An earlier note here blamed
+        // `is_playing()` for being unreliable. It is not: rodio counts a source
+        // as playing until it finishes. See `AudioEngine::is_playing`.)
         let ticking = self
             .audio
             .as_ref()
