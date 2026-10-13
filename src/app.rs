@@ -3038,17 +3038,61 @@ impl App {
     ///
     /// The replacement is already on disk; this process is running from the old
     /// inode, so it has to go for the new one to be what starts next.
+    ///
+    /// The child is started without the AppImage variables this process
+    /// inherited — `APPIMAGE`, `APPDIR`, `LD_LIBRARY_PATH` and friends point
+    /// into a mount that disappears when this exits, and a child that inherits
+    /// them can fail to come up. When that happens the button looks like it did
+    /// nothing at all, which is what this is here to stop: the child is watched
+    /// for a moment, and if it falls over the reason is put in front of the
+    /// user rather than into a status line in the corner.
     fn restart_now(&mut self) {
         let exe = match &self.update_kind {
             update::InstallKind::AppImage(path) => path.clone(),
             _ => std::env::current_exe().unwrap_or_default(),
         };
-        // Save first: exiting this way skips the usual shutdown path.
+        // Exiting this way skips the usual shutdown path, so save first.
         self.save_ui_settings();
-        if std::process::Command::new(&exe).spawn().is_ok() {
-            std::process::exit(0);
+
+        let mut command = std::process::Command::new(&exe);
+        for key in [
+            "APPIMAGE",
+            "APPDIR",
+            "ARGV0",
+            "OWD",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+        ] {
+            command.env_remove(key);
         }
-        self.status = Some("Could not restart; close and open the app again".to_string());
+        match command.spawn() {
+            Ok(mut child) => {
+                // Ok from spawn only means fork and exec worked. The new build
+                // can still fall over a moment later — a missing library, a
+                // mount that went away — so give it a moment and look.
+                std::thread::sleep(Duration::from_millis(1500));
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        self.update_state = UpdateState::Failed(format!(
+                            "the new build exited immediately ({status})"
+                        ));
+                        self.status = Some(format!(
+                            "The update is at {} — open it again",
+                            exe.display()
+                        ));
+                    }
+                    _ => std::process::exit(0),
+                }
+            }
+            Err(e) => {
+                self.update_state =
+                    UpdateState::Failed(format!("could not start {}: {e}", exe.display()));
+                self.status = Some(format!(
+                    "The update is at {} — open it again",
+                    exe.display()
+                ));
+            }
+        }
     }
 
     fn spawn_ytdlp_version(&mut self, ctx: &egui::Context) {
@@ -3275,11 +3319,10 @@ impl App {
                             );
                         }
                         UpdateState::Failed(why) => {
-                            ui.label(
-                                RichText::new(format!("Could not check: {why}"))
-                                    .color(ui::WARN)
-                                    .small(),
-                            );
+                            // The messages already say what went wrong, and they
+                            // are not all about checking: a restart that failed
+                            // lands here too.
+                            ui.label(RichText::new(why.clone()).color(ui::WARN).small());
                         }
                         UpdateState::Available(release) => {
                             ui.label(

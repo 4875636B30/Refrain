@@ -78,6 +78,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.10" date="2026-10-13">
+      <description>
+        <p>Restarting after an update starts the new build without the
+           environment the old one was running in, which could stop it coming
+           up — and if it fails, the reason is now shown rather than left in a
+           corner.</p>
+      </description>
+    </release>
     <release version="0.1.9" date="2026-10-13">
       <description>
         <p>Lyrics for the track that is playing, in a tab beside the queue.
