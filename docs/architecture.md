@@ -537,6 +537,16 @@ Environment variables still work as a fallback: `YTDLP_COOKIES`,
 
 ## Diagnostics
 
+`--fps` prints the frame rate the platform is actually delivering, once a
+second. It exists because "the animation looks choppy" is not a number, and
+whether frames arrive depends on the compositor, the driver, and whether the
+window is being looked at — none of which the app controls. Measuring it in a
+headless-ish environment produced one frame a second for an unconditional
+request in a release build, which says everything about that environment and
+nothing about the app.
+
+## Diagnostics
+
 Everything below runs without a GUI, which is what makes them useful on a
 machine with no display:
 

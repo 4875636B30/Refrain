@@ -78,6 +78,15 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.12" date="2026-10-13">
+      <description>
+        <p>The playing row's equaliser animates at the frame rate the platform
+           delivers rather than at the four frames a second the rest of the
+           player bar needs.</p>
+        <p><code>--fps</code> reports that rate, for when an animation looks
+           wrong and it matters whether the app or the display is to blame.</p>
+      </description>
+    </release>
     <release version="0.1.11" date="2026-10-13">
       <description>
         <p>When a queue or an album ends, playback continues with related

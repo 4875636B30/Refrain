@@ -687,6 +687,10 @@ pub struct App {
     lyrics_for: Option<String>,
     /// Keep playing similar music when the queue runs out.
     autoplay: bool,
+    /// `--fps`: report the frame rate the platform actually delivers.
+    fps_probe: bool,
+    fps_frames: u32,
+    fps_since: Instant,
     /// A radio fetch is on its way.
     radio_inflight: bool,
     /// The track a radio fetch was last started for, so a queue that ends
@@ -896,6 +900,9 @@ impl App {
             lyrics: LyricsState::Idle,
             lyrics_for: None,
             autoplay: cfg.ui.autoplay,
+            fps_probe: std::env::args().any(|arg| arg == "--fps"),
+            fps_frames: 0,
+            fps_since: Instant::now(),
             radio_inflight: false,
             radio_anchored: None,
             picker: None,
@@ -2591,6 +2598,29 @@ impl App {
         if filter_changed {
             // Changing category re-runs the search for that category.
             self.run_search(ctx);
+        }
+    }
+
+    /// Report the frame rate the platform is actually delivering, for `--fps`.
+    ///
+    /// Whether an animation looks smooth is decided by how many frames arrive,
+    /// and that depends on the compositor, the driver, and whether the window
+    /// is even being looked at. Guessing at it is how you spend an afternoon
+    /// measuring a debug build. This turns "it looks choppy" into a number.
+    fn tick_fps_probe(&mut self) {
+        if !self.fps_probe {
+            return;
+        }
+        self.fps_frames += 1;
+        let elapsed = self.fps_since.elapsed().as_secs_f32();
+        if elapsed >= 1.0 {
+            eprintln!(
+                "[fps] {:.1} frames/s ({} frames in {elapsed:.2}s)",
+                self.fps_frames as f32 / elapsed,
+                self.fps_frames
+            );
+            self.fps_frames = 0;
+            self.fps_since = Instant::now();
         }
     }
 
@@ -4353,6 +4383,7 @@ impl eframe::App for App {
             self.theme_applied = true;
         }
 
+        self.tick_fps_probe();
         self.flush_pending_save(&ctx);
         if self.update_state == UpdateState::Idle && self.update_check_due() {
             self.spawn_update_check(&ctx);
@@ -4375,8 +4406,26 @@ impl eframe::App for App {
         self.bottom_bar(ui, &ctx);
         self.central(ui, &ctx);
 
-        let playing = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
-        if self.busy || !self.downloading.is_empty() || playing {
+        // The equaliser on the playing row is the one thing here that has to
+        // look like motion, and it is drawn from a continuous clock — so the
+        // frame rate is the only thing deciding whether it looks smooth. Four
+        // frames a second, which is what the position label needs, reads as a
+        // stutter; thirty is enough to look like an animation. It costs a
+        // little while something is playing and nothing at all otherwise,
+        // since a paused player holds its bars still.
+        // "A track is loaded and not paused" rather than `is_playing()`: that
+        // one is built on rodio's `Player::empty()`, which asks how many
+        // sources are *queued* — and a single appended source leaves the queue
+        // the moment the audio thread picks it up, so it reads as empty while
+        // it is still playing. Depending on it here means the animation's frame
+        // rate falls to whatever else happens to wake the app.
+        let ticking = self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.now_playing.is_some() && !audio.is_paused());
+        if ticking {
+            ctx.request_repaint_after(Duration::from_millis(33));
+        } else if self.busy || !self.downloading.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         // Keep pulling in artwork that is still on its way.
