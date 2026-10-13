@@ -2359,31 +2359,40 @@ impl App {
                     egui::vec2(centre_width, ui::CONTROL_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        // The category chip lives inside the field, so the
-                        // cluster is the field and the button — there is nothing
-                        // sitting beside anything else to collide with, at any
-                        // window width. The field takes what is going, up to a
-                        // point where a wider one would stop helping.
-                        const SEARCH_MAX: f32 = 460.0;
+                        // Field, category chip, button — three controls in a
+                        // row. The chip fits its label, but the slot it sits in
+                        // is fixed, or the centred cluster would shuffle sideways
+                        // whenever the filter changed.
+                        const SEARCH_MAX: f32 = 440.0;
+                        const FILTER_SLOT: f32 = 118.0;
                         const BUTTON: f32 = 88.0;
-                        const GAP: f32 = 12.0;
-                        let search_width = (centre_width - GAP - BUTTON).clamp(200.0, SEARCH_MAX);
-                        let cluster = search_width + GAP + BUTTON;
+                        const GAP: f32 = 10.0;
+                        let search_width = (centre_width - GAP * 2.0 - FILTER_SLOT - BUTTON)
+                            .clamp(200.0, SEARCH_MAX);
+                        let cluster = search_width + GAP * 2.0 + FILTER_SLOT + BUTTON;
                         ui.add_space(((centre_width - cluster) / 2.0).max(0.0));
-                        let chip_width = ui::pill_width(ui, self.filter.label());
-                        let (submitted, chosen) =
-                            ui::search_field(ui, &mut self.query, search_width, chip_width, |ui| {
-                                ui::pill_dropdown(
+                        if ui::search_field(ui, &mut self.query, search_width) {
+                            do_search = true;
+                        }
+                        ui.add_space(GAP);
+                        let mut chosen = None;
+                        ui::fixed_section(
+                            ui,
+                            egui::vec2(FILTER_SLOT, ui::CONTROL_HEIGHT),
+                            // Centred in its slot: left-aligned it hugged the
+                            // field and read as part of it, which is the thing
+                            // this is meant to stop looking like.
+                            Layout::top_down(Align::Center),
+                            |ui| {
+                                chosen = ui::pill_dropdown(
                                     ui,
                                     "search_filter",
                                     self.filter,
                                     &SearchFilter::ALL_FILTERS,
                                     |filter| filter.label(),
-                                )
-                            });
-                        if submitted {
-                            do_search = true;
-                        }
+                                );
+                            },
+                        );
                         if let Some(chosen) = chosen {
                             self.filter = chosen;
                             filter_changed = true;

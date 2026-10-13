@@ -142,7 +142,14 @@ pub async fn check(http: &reqwest::Client, current: &str) -> Result<Option<Relea
         .await
         .map_err(|e| format!("could not reach GitHub: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("GitHub answered {}", response.status()));
+        let status = response.status();
+        // Shared addresses hit GitHub's unauthenticated limit, which is 60
+        // requests an hour for everyone behind them. Saying so beats "403", and
+        // the daily check simply tries again tomorrow.
+        if status.as_u16() == 403 || status.as_u16() == 429 {
+            return Err("GitHub is rate-limiting this network, so try again later".to_string());
+        }
+        return Err(format!("GitHub answered {status}"));
     }
     let body: Value = response
         .json()

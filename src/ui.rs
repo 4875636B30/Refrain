@@ -885,40 +885,15 @@ fn cover_tile(
 /// Stable id for the search field, so keyboard shortcuts can focus it.
 pub const SEARCH_ID: &str = "refrain_search_field";
 
-/// How wide a `pill_dropdown` carrying this label will be.
+/// The search field. Returns whether Enter was pressed.
 ///
-/// The search field has to reserve room for the category chip before the chip
-/// exists, and reserving the wrong amount either clips the text or leaves a gap
-/// where the hairline should be.
-pub fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
-    let visuals = ui.visuals();
-    ui.painter()
-        .layout_no_wrap(
-            label.to_string(),
-            egui::FontId::proportional(14.0),
-            visuals.text_color(),
-        )
-        .size()
-        .x
-        + 40.0
-}
-
-/// The search field, with room at its right end for a caller-drawn control —
-/// the category chip, in practice. Returns whether Enter was pressed, and
-/// whatever the trailing closure returned.
-///
-/// The chip sits *inside* the field rather than beside it. Two rounded shapes
-/// next to each other read as one shape, and at some window widths they looked
-/// like they had collided; inside, there is nothing to collide with. The width
-/// is reserved whether or not the caller draws anything, so the text does not
-/// move as the filter changes.
-pub fn search_field<R>(
-    ui: &mut egui::Ui,
-    query: &mut String,
-    width: f32,
-    trailing_width: f32,
-    trailing: impl FnOnce(&mut egui::Ui) -> R,
-) -> (bool, R) {
+/// The category chip used to be drawn inside this, which was hiding a layout
+/// bug rather than making a design: the text is laid out in a scope, and a scope
+/// finishes by moving the cursor to the end of *its* rectangle — short of the
+/// field, because the rest was reserved for the chip — so whatever came next
+/// was placed inside the field. With the cursor put back where it belongs, the
+/// chip can sit beside the field like any other control.
+pub fn search_field(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
     let focused = ui.memory(|memory| memory.has_focus(egui::Id::new(SEARCH_ID)));
     let visuals = ui.visuals().clone();
     let radius = egui::CornerRadius::same((CONTROL_HEIGHT / 2.0) as u8);
@@ -942,21 +917,11 @@ pub fn search_field<R>(
     }
 
     let inner = rect.shrink2(egui::vec2(13.0, 0.0));
-    let (divider_x, text_right) = if trailing_width > 0.0 {
-        let chip_left = (inner.right() - trailing_width).max(inner.left() + 60.0);
-        (chip_left - 7.0, chip_left - 13.0)
-    } else {
-        (inner.right(), inner.right())
-    };
-
     let mut submitted = false;
     let mut clear = false;
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_max(
-                inner.min,
-                egui::pos2(text_right, inner.max.y),
-            ))
+            .max_rect(inner)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             draw_icon(
@@ -972,7 +937,7 @@ pub fn search_field<R>(
 
             // Room is reserved for the clear button whether or not it is drawn,
             // so the text does not shift as you type.
-            let text_width = (text_right - inner.left() - 25.0 - 24.0).max(40.0);
+            let text_width = (inner.width() - 25.0 - 24.0).max(40.0);
             let edit = ui.add(
                 egui::TextEdit::singleline(query)
                     .frame(egui::Frame::NONE)
@@ -990,35 +955,17 @@ pub fn search_field<R>(
         },
     );
 
-    if trailing_width > 0.0 {
-        ui.painter().vline(
-            divider_x,
-            egui::Rangef::new(rect.top() + 8.0, rect.bottom() - 8.0),
-            egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
-        );
-    }
-    let mut chip_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_max(
-                egui::pos2(divider_x + 7.0, rect.top() + 2.0),
-                egui::pos2(inner.right(), rect.bottom() - 2.0),
-            ))
-            .layout(Layout::left_to_right(Align::Center)),
-    );
-    let trailing_result = trailing(&mut chip_ui);
-
-    // Put the cursor back at the field's right edge. The text is drawn inside a
-    // scope, and a scope ends by advancing the cursor to the end of *its* rect —
-    // which is short of the field, because the chip occupies the rest. Without
-    // this, whatever comes next is laid out inside the field instead of after
-    // it, which is what made the filter pill overlap the search box.
+    // Put the cursor back at the field's right edge. A scope ends by advancing
+    // the cursor to the end of *its* rect, which is short of the field, and
+    // without this whatever comes next is laid out inside the field instead of
+    // after it — which is what made the filter pill overlap the search box.
     ui.advance_cursor_after_rect(rect);
 
     if clear {
         query.clear();
         ui.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH_ID)));
     }
-    (submitted, trailing_result)
+    submitted
 }
 
 /// A rounded panel grouping related settings.
