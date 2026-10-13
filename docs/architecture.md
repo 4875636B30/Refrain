@@ -217,6 +217,10 @@ it:
 - **Artwork** was decoded at 160px whatever it was drawn at, so a 56px row tile
   cost 100 KB instead of 12. Rows outnumber covers many times over and the
   cache holds 200 textures, so the ceiling went from 20 MB of artwork to a few.
+- **The stream buffer** kept every byte of the playing track in memory for the
+  decoder to read, *as well as* writing it to the cache file. The file is the
+  buffer now: a track that plays for four minutes no longer sits in RAM while
+  it does. Measured at 8 MB less resident while streaming.
 
 
 Measured on a release build with the home feed loaded: **~205 MB resident**,

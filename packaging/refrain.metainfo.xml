@@ -78,6 +78,13 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.14" date="2026-10-13">
+      <description>
+        <p>Streaming playback buffers to disk rather than to memory: a track
+           that plays for four minutes no longer sits in RAM while it does,
+           which is about 8 MB while something is playing.</p>
+      </description>
+    </release>
     <release version="0.1.13" date="2026-10-13">
       <description>
         <p>Updates download to disk instead of into memory: a 52 MB release
