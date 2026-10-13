@@ -261,6 +261,12 @@ impl AuthConfig {
     }
 }
 
+/// For fields whose absence should mean "on", since `serde`'s default for a
+/// bool is false.
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -272,6 +278,9 @@ pub struct UiConfig {
     /// every launch.
     #[serde(default)]
     pub last_update_check: Option<u64>,
+    /// Whether to keep playing similar music when a queue runs out.
+    #[serde(default = "yes")]
+    pub autoplay: bool,
 }
 
 impl Default for UiConfig {
@@ -280,6 +289,7 @@ impl Default for UiConfig {
             volume: 0.8,
             theme: "dark".to_string(),
             last_update_check: None,
+            autoplay: true,
         }
     }
 }

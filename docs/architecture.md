@@ -357,6 +357,34 @@ same reason. It is also why the runtime is worth *naming* in diagnostics:
 `--canary` reports which one was found, and fails when there is none, which is
 what keeps a release from shipping without one.
 
+## Autoplay
+
+An album that stops at the end is the loudest difference from YouTube Music, so
+when a queue runs out the app asks for more of the same. The mechanism is
+already half-present: every track belongs to an endless **radio** playlist, and
+the watch-next response names it — a `watchPlaylistEndpoint` carrying an
+`RDAMVM…` id — in the queue's own navigation.
+
+So autoplay is two requests. The player response names the radio, and asking the
+player panel for a window around the track (`playlist_more`, which existed
+already for paging long playlists) returns about fifty tracks around it. Those
+are deduplicated against the queue and appended, and playback continues at the
+next index.
+
+It stays endless because each window is anchored on a track rather than an
+offset: when the new tracks run out, the last of them is anchored on, and its
+window overlaps but extends. A track with no radio, or a radio with nothing new,
+stops playback rather than asking again — the alternative is a loop of requests
+for music that does not exist.
+
+Two details worth keeping:
+
+- The radio id has to be *this track's*. An album page names one per row, so a
+  parser that grabs the first `RD…` it sees autoplays from the wrong track. The
+  test asserts the id ends with the fixture's video id.
+- Autoplay is a setting, on by default, because a queue that never ends is not
+  always what someone wants.
+
 ## Lyrics
 
 Two requests, and neither is the one you would expect:

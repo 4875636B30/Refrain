@@ -160,7 +160,50 @@ def main() -> int:
     print(f"  lyrics browse id: {lyrics_id}")
     if lyrics_id:
         save("lyrics", post("browse", {"browseId": lyrics_id}))
+
+    # The same track's endless radio, as the player panel returns it: this is
+    # what autoplay plays when a queue runs out.
+    radio_id = radio_playlist_id(player)
+    print(f"  radio playlist id: {radio_id}")
+    if radio_id:
+        save(
+            "radio",
+            post(
+                "next",
+                {
+                    "videoId": LYRICS_TRACK,
+                    "playlistId": radio_id,
+                    "playlistPanelOffset": 0,
+                    "isAudioOnly": True,
+                },
+            ),
+        )
     return 0
+
+
+def radio_playlist_id(node) -> str | None:
+    found = None
+
+    def walk(value) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if isinstance(value, dict):
+            for key in ("watchPlaylistEndpoint", "watchEndpoint"):
+                endpoint = value.get(key)
+                if isinstance(endpoint, dict):
+                    playlist_id = endpoint.get("playlistId")
+                    if isinstance(playlist_id, str) and playlist_id.startswith("RD"):
+                        found = playlist_id
+                        return
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(node)
+    return found
 
 
 def lyrics_browse_id(node) -> str | None:

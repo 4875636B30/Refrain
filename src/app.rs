@@ -68,6 +68,8 @@ enum Msg {
     YtdlpVersion(Option<String>),
     /// The lyrics for the current track, or why there are none.
     Lyrics(Result<Option<Lyrics>, String>),
+    /// More of the same kind of music, for when a queue runs out.
+    Radio(Result<Option<Vec<Track>>, String>),
     /// The answer to "is there a newer release", or why we could not ask.
     UpdateChecked(Result<Option<update::Release>, String>),
     /// The result of installing one, with the version it was.
@@ -683,6 +685,13 @@ pub struct App {
     lyrics: LyricsState,
     /// Which track the lyrics in hand belong to, so they are fetched once.
     lyrics_for: Option<String>,
+    /// Keep playing similar music when the queue runs out.
+    autoplay: bool,
+    /// A radio fetch is on its way.
+    radio_inflight: bool,
+    /// The track a radio fetch was last started for, so a queue that ends
+    /// twice does not ask twice.
+    radio_anchored: Option<String>,
     /// Whether the sign-in attempt has finished, successfully or not. The demo
     /// waits for this: signing in re-runs the last search, which would otherwise
     /// yank the view back while the script is navigating.
@@ -886,6 +895,9 @@ impl App {
             show_lyrics: false,
             lyrics: LyricsState::Idle,
             lyrics_for: None,
+            autoplay: cfg.ui.autoplay,
+            radio_inflight: false,
+            radio_anchored: None,
             picker: None,
             renaming: None,
             deleting: None,
@@ -1672,6 +1684,49 @@ impl App {
                         Err(why) => LyricsState::Failed(why),
                     };
                 }
+                Msg::Radio(result) => {
+                    self.radio_inflight = false;
+                    match result {
+                        Ok(Some(tracks)) => {
+                            let known: std::collections::HashSet<String> =
+                                self.queue.iter().map(|t| t.video_id.clone()).collect();
+                            let fresh: Vec<Track> = tracks
+                                .into_iter()
+                                .filter(|track| !known.contains(&track.video_id))
+                                .collect();
+                            if fresh.is_empty() {
+                                // The radio had nothing new; stop where we are
+                                // rather than asking again on the next track.
+                                self.status = Some("Nothing more like this".to_string());
+                                self.current = None;
+                                if let Some(audio) = self.audio.as_mut() {
+                                    audio.stop();
+                                }
+                            } else {
+                                let added = fresh.len();
+                                self.queue.extend(fresh);
+                                self.status = Some(format!("Added {added} similar tracks"));
+                                if let Some(next) = self.current.map(|index| index + 1) {
+                                    self.play_index(ctx, next);
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            self.status = Some("Nothing more like this".to_string());
+                            self.current = None;
+                            if let Some(audio) = self.audio.as_mut() {
+                                audio.stop();
+                            }
+                        }
+                        Err(why) => {
+                            self.status = Some(format!("Could not find more music: {why}"));
+                            self.current = None;
+                            if let Some(audio) = self.audio.as_mut() {
+                                audio.stop();
+                            }
+                        }
+                    }
+                }
                 Msg::UpdateChecked(Ok(Some(release))) => {
                     self.update_state = UpdateState::Available(release);
                 }
@@ -2229,6 +2284,13 @@ impl App {
         match advance_decision(self.repeat, shuffle_index, self.queue.len(), self.current) {
             Advance::Play(index) => self.play_index(ctx, index),
             Advance::Stop => {
+                // The queue ran out. Rather than stopping, ask the track's
+                // endless radio for more — which is what makes an album keep
+                // playing instead of falling silent at the end.
+                if self.autoplay && !self.queue.is_empty() {
+                    self.spawn_radio(ctx);
+                    return;
+                }
                 self.current = None;
                 if let Some(audio) = self.audio.as_mut() {
                     audio.stop();
@@ -2557,6 +2619,7 @@ impl App {
         let mut cfg = Config::load();
         cfg.ui.theme = if self.theme_light { "light" } else { "dark" }.to_string();
         cfg.ui.volume = self.volume;
+        cfg.ui.autoplay = self.autoplay;
         let _ = cfg.save();
     }
 
@@ -3467,6 +3530,21 @@ impl App {
                             .small(),
                         );
                     }
+
+                    ui.add_space(8.0);
+                    let mut autoplay = self.autoplay;
+                    if ui
+                        .checkbox(&mut autoplay, "Autoplay similar music")
+                        .on_hover_text(
+                            "When a queue or an album ends, keep playing related tracks from \
+                             the track's radio, the way YouTube Music does.",
+                        )
+                        .changed()
+                    {
+                        self.autoplay = autoplay;
+                        self.pending_save = true;
+                        self.pending_save_at = Instant::now();
+                    }
                 });
             });
 
@@ -3759,6 +3837,37 @@ impl App {
             }
             DemoStep::ShowQueue => self.show_queue = true,
         }
+    }
+
+    /// Ask the track that just finished for more of the same.
+    fn spawn_radio(&mut self, ctx: &egui::Context) {
+        if self.radio_inflight {
+            return;
+        }
+        let Some(track) = self
+            .current
+            .and_then(|index| self.queue.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if self.radio_anchored.as_deref() == Some(track.video_id.as_str()) {
+            return;
+        }
+        self.radio_anchored = Some(track.video_id.clone());
+        self.radio_inflight = true;
+        self.status = Some("Looking for more like this…".to_string());
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .radio_more(&track.video_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Radio(result));
+            ctx.request_repaint();
+        });
     }
 
     /// Fetch lyrics for the track that is playing, once per track, and only

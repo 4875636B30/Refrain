@@ -762,6 +762,48 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
 /// `INDIFFERENT` / `LIKE` / `DISLIKE`, next to whether rating is allowed at all.
 /// Missing entirely (older or reshuffled responses) reads as "not rated, and
 /// not rateable", which is the safe direction to fail in.
+/// The id of the endless "radio" playlist a track belongs to.
+///
+/// The watch-next response names it in the queue's own navigation: a
+/// `watchPlaylistEndpoint` (or, on older items, a `watchEndpoint`) carrying a
+/// `RDAMVM…` id. That playlist is what makes autoplay possible — asking the
+/// player panel for a window around any track in it returns more of the same
+/// kind of music, indefinitely.
+pub fn radio_playlist_id(v: &Value) -> Option<String> {
+    fn walk(node: &Value, found: &mut Option<String>) {
+        if found.is_some() {
+            return;
+        }
+        match node {
+            Value::Object(map) => {
+                for key in ["watchPlaylistEndpoint", "watchEndpoint"] {
+                    if let Some(id) = map
+                        .get(key)
+                        .and_then(|endpoint| endpoint.get("playlistId"))
+                        .and_then(Value::as_str)
+                        .filter(|id| id.starts_with("RD"))
+                    {
+                        *found = Some(id.to_string());
+                        return;
+                    }
+                }
+                for value in map.values() {
+                    walk(value, found);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = None;
+    walk(v, &mut found);
+    found
+}
+
 /// The browse id of a track's lyrics page, if the player response offers one.
 ///
 /// The watch-next response lists its tabs, and the lyrics one carries a browse
@@ -1123,6 +1165,28 @@ mod captured {
             assert!(!shelf.title.is_empty(), "a shelf with no title");
             assert!(!shelf.items.is_empty(), "shelf {:?} is empty", shelf.title);
         }
+    }
+
+    /// The radio has to be *this track's* radio. An album page names one per
+    /// row, so a parser that grabs the first `RD…` it sees would happily
+    /// autoplay from the wrong track.
+    #[test]
+    fn a_player_response_names_the_track_radio() {
+        let id = radio_playlist_id(&fixture("next")).expect("this track has a radio");
+        assert_eq!(id, "RDAMVMajGKWk0auOc");
+        assert!(
+            id.ends_with("ajGKWk0auOc"),
+            "radio {id} is not this track's"
+        );
+    }
+
+    #[test]
+    fn a_response_without_a_queue_has_no_radio() {
+        assert_eq!(radio_playlist_id(&serde_json::json!({})), None);
+        assert_eq!(
+            radio_playlist_id(&serde_json::json!({ "contents": [] })),
+            None
+        );
     }
 
     #[test]

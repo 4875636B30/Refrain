@@ -417,6 +417,20 @@ impl Client {
         Ok(self.browse("FEmusic_history").await?.tracks)
     }
 
+    /// More of the same kind of music, from the track's endless radio.
+    ///
+    /// Two requests, because the radio's id only arrives with the player
+    /// response for a track. `None` means this track has no radio — the
+    /// response says nothing, and there is nothing to keep playing.
+    pub async fn radio_more(&self, video_id: &str) -> Result<Option<Vec<super::domain::Track>>> {
+        let player = self.post("next", json!({ "videoId": video_id })).await?;
+        let Some(playlist_id) = extract::radio_playlist_id(&player) else {
+            return Ok(None);
+        };
+        let tracks = self.playlist_more(video_id, &playlist_id).await?;
+        Ok(Some(tracks))
+    }
+
     /// The rest of a long playlist, via the player panel.
     ///
     /// `browse` caps a playlist at 100 tracks. The `next` endpoint returns a
