@@ -293,9 +293,13 @@ fn spawn_auth(
             crate::auth::resolve(&cfg).await
         };
 
-        // A reused jar is only trusted if InnerTube still accepts it.
+        // A reused jar is only trusted if InnerTube still accepts it — but only
+        // a jar that *claims* a YouTube session can be a stale one. A jar with
+        // no session is simply anonymous, and re-extracting cannot invent one.
+        // Doing it anyway spent 10-30 seconds of yt-dlp before the first frame,
+        // on every launch, to arrive back at anonymous.
         let stale = match &resolved {
-            Ok(Some(auth)) => {
+            Ok(Some(auth)) if auth.jar.has_youtube_session() => {
                 match crate::ytm::Client::new(&lang, &country, Some(auth.jar.clone())) {
                     Ok(probe) => !probe.logged_in().await.unwrap_or(false),
                     Err(_) => false,

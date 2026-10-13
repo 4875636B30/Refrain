@@ -432,6 +432,15 @@ pub async fn auto_resolve() -> Result<Option<ResolvedAuth>> {
             return Ok(Some(found));
         }
     }
+    // Nothing had a YouTube session, but remember what was found anyway. The
+    // source cache is what lets the next launch skip extraction entirely, and
+    // without this a machine with no session extracts on every single start:
+    // thirty seconds of yt-dlp, before the first frame, to get back to the same
+    // anonymous jar. A real session is still preferred the next time the cookie
+    // cache expires and this runs again.
+    if let Some(found) = &fallback {
+        store_source(&found.source);
+    }
     Ok(fallback)
 }
 
