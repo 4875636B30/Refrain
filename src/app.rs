@@ -188,6 +188,17 @@ enum Action {
         playlist_id: String,
         title: String,
     },
+    /// Put a track straight after the one that is playing.
+    QueuePlayNext(Track),
+    /// Put a track at the end of the queue.
+    QueueAppend(Track),
+    /// Take an entry out of the queue.
+    QueueRemove(usize),
+    /// Move a queue entry to another position.
+    QueueMove {
+        from: usize,
+        to: usize,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -484,6 +495,68 @@ fn advance_decision(
         Some(_) if repeat == Repeat::All && queue_len > 0 => Advance::Play(0),
         _ => Advance::Stop,
     }
+}
+
+/// What removing a queue entry means for playback.
+#[derive(Debug, PartialEq, Eq)]
+enum Removal {
+    /// Something else was removed. This is the playing track's new index, and
+    /// it is still the track it was.
+    Shifted(Option<usize>),
+    /// The track that was playing was removed. Play whatever is now at this
+    /// index, or stop if there is nothing.
+    PlayNow(Option<usize>),
+}
+
+/// Remove one entry, and say what becomes of the playing track.
+///
+/// `current` is an index, not a track, so a removal above it has to move it
+/// down by one. Getting this wrong is invisible until playback carries on from
+/// the wrong place several songs later.
+fn queue_remove(queue: &mut Vec<Track>, current: Option<usize>, index: usize) -> Removal {
+    if index >= queue.len() {
+        return Removal::Shifted(current);
+    }
+    queue.remove(index);
+    match current {
+        None => Removal::Shifted(None),
+        Some(c) if index < c => Removal::Shifted(Some(c - 1)),
+        // The queue shifted under the playing track: index `c` now holds
+        // whatever followed it, so playback moves on rather than repeating.
+        Some(c) if index == c => Removal::PlayNow((c < queue.len()).then_some(c)),
+        Some(c) => Removal::Shifted(Some(c)),
+    }
+}
+
+/// Move one entry to another position, and say where the playing track lands.
+fn queue_reorder(
+    queue: &mut Vec<Track>,
+    current: Option<usize>,
+    from: usize,
+    to: usize,
+) -> Option<usize> {
+    if from >= queue.len() || to >= queue.len() || from == to {
+        return current;
+    }
+    let track = queue.remove(from);
+    queue.insert(to, track);
+    match current {
+        None => None,
+        // The playing track is the one that moved.
+        Some(c) if c == from => Some(to),
+        // The gap closed behind the moved track…
+        Some(c) if from < c && c <= to => Some(c - 1),
+        // …or opened ahead of it.
+        Some(c) if to <= c && c < from => Some(c + 1),
+        Some(c) => Some(c),
+    }
+}
+
+/// Put `track` straight after the one that is playing, or at the front when
+/// nothing is.
+fn queue_play_next(queue: &mut Vec<Track>, current: Option<usize>, track: Track) {
+    let at = current.map(|c| c + 1).unwrap_or(0).min(queue.len());
+    queue.insert(at, track);
 }
 
 /// A pseudo-random queue index, without pulling in a dependency.
@@ -1348,6 +1421,24 @@ impl App {
         self.play_at(ctx, idx, false);
     }
 
+    /// Take an entry out of the queue, keeping playback consistent with what the
+    /// queue now says.
+    fn remove_from_queue(&mut self, ctx: &egui::Context, index: usize) {
+        match queue_remove(&mut self.queue, self.current, index) {
+            Removal::Shifted(current) => self.current = current,
+            // The track that was playing is gone from the queue, so move on to
+            // whatever took its place.
+            Removal::PlayNow(Some(next)) => self.play_index(ctx, next),
+            Removal::PlayNow(None) => {
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.stop();
+                }
+                self.current = None;
+                self.advance_armed = false;
+            }
+        }
+    }
+
     /// Play `idx`, optionally skipping the wait for sign-in.
     fn play_at(&mut self, ctx: &egui::Context, idx: usize, anonymous_ok: bool) {
         let Some(track) = self.queue.get(idx).cloned() else {
@@ -1590,6 +1681,12 @@ impl App {
             Action::PlayList { tracks, index } => {
                 self.queue = tracks;
                 self.play_index(ctx, index);
+            }
+            Action::QueuePlayNext(track) => queue_play_next(&mut self.queue, self.current, track),
+            Action::QueueAppend(track) => self.queue.push(track),
+            Action::QueueRemove(idx) => self.remove_from_queue(ctx, idx),
+            Action::QueueMove { from, to } => {
+                self.current = queue_reorder(&mut self.queue, self.current, from, to);
             }
             Action::LoadMoreTracks => {
                 if let View::Detail(page) = &self.view
@@ -2868,10 +2965,20 @@ impl App {
                 selected,
                 active,
                 false,
+                true,
+                false,
                 item.playable(),
                 item.navigable(),
             );
-            if row.add_to_playlist {
+            if row.play_next {
+                if let Some(track) = item.to_track() {
+                    *action = Some(Action::QueuePlayNext(track));
+                }
+            } else if row.add_to_queue {
+                if let Some(track) = item.to_track() {
+                    *action = Some(Action::QueueAppend(track));
+                }
+            } else if row.add_to_playlist {
                 if let Some(video_id) = item.video_id.clone() {
                     *action = Some(Action::AddToPlaylist {
                         video_id,
@@ -2952,8 +3059,14 @@ impl App {
                 playlist_id.is_some(),
                 true,
                 false,
+                true,
+                false,
             );
-            if row.add_to_playlist {
+            if row.play_next {
+                *action = Some(Action::QueuePlayNext(track.clone()));
+            } else if row.add_to_queue {
+                *action = Some(Action::QueueAppend(track.clone()));
+            } else if row.add_to_playlist {
                 *action = Some(Action::AddToPlaylist {
                     video_id: track.video_id.clone(),
                     title: track.title.clone(),
@@ -4191,10 +4304,24 @@ impl App {
                         selected,
                         active,
                         false,
+                        false,
+                        true,
                         true,
                         false,
                     );
-                    if row.clicked {
+                    if row.remove_from_queue {
+                        *action = Some(Action::QueueRemove(idx));
+                    } else if row.move_up {
+                        *action = Some(Action::QueueMove {
+                            from: idx,
+                            to: idx.saturating_sub(1),
+                        });
+                    } else if row.move_down {
+                        *action = Some(Action::QueueMove {
+                            from: idx,
+                            to: idx + 1,
+                        });
+                    } else if row.clicked {
                         *action = Some(Action::PlayQueueIndex(idx));
                     }
                 }
@@ -4619,6 +4746,113 @@ mod recovery_tests {
         assert_eq!(recovery_index(&queue, Some(1), "gone"), None);
         assert_eq!(recovery_index(&queue, None, "b"), None);
         assert_eq!(recovery_index(&[], Some(0), "b"), None);
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn track(id: &str) -> Track {
+        Track {
+            video_id: id.to_string(),
+            title: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn ids(queue: &[Track]) -> Vec<&str> {
+        queue.iter().map(|t| t.video_id.as_str()).collect()
+    }
+
+    /// Removing an entry above the playing one has to move the index down with
+    /// it, or playback carries on from the wrong track.
+    #[test]
+    fn removing_above_the_playing_track_shifts_its_index() {
+        let mut queue = vec![track("a"), track("b"), track("c")];
+        let removal = queue_remove(&mut queue, Some(2), 0);
+        assert_eq!(ids(&queue), ["b", "c"]);
+        assert_eq!(removal, Removal::Shifted(Some(1)));
+    }
+
+    #[test]
+    fn removing_below_the_playing_track_leaves_its_index_alone() {
+        let mut queue = vec![track("a"), track("b"), track("c")];
+        let removal = queue_remove(&mut queue, Some(0), 2);
+        assert_eq!(ids(&queue), ["a", "b"]);
+        assert_eq!(removal, Removal::Shifted(Some(0)));
+    }
+
+    /// Removing the track that is playing hands playback to whatever followed
+    /// it, rather than leaving the queue pointing at something already gone.
+    #[test]
+    fn removing_the_playing_track_plays_what_follows() {
+        let mut queue = vec![track("a"), track("b"), track("c")];
+        let removal = queue_remove(&mut queue, Some(1), 1);
+        assert_eq!(ids(&queue), ["a", "c"]);
+        assert_eq!(removal, Removal::PlayNow(Some(1)));
+
+        // The last one has nothing after it, so playback stops.
+        let mut queue = vec![track("a"), track("b")];
+        let removal = queue_remove(&mut queue, Some(1), 1);
+        assert_eq!(ids(&queue), ["a"]);
+        assert_eq!(removal, Removal::PlayNow(None));
+    }
+
+    /// Reordering has to carry the playing track with its song, in both
+    /// directions across it.
+    #[test]
+    fn reordering_keeps_the_playing_track() {
+        // Moving the playing track itself.
+        let mut queue = vec![track("a"), track("b"), track("c")];
+        let current = queue_reorder(&mut queue, Some(1), 1, 0);
+        assert_eq!(ids(&queue), ["b", "a", "c"]);
+        assert_eq!(current, Some(0));
+
+        // A track from above it moves past it, so the gap closes behind.
+        let mut queue = vec![track("a"), track("b"), track("c"), track("d")];
+        let current = queue_reorder(&mut queue, Some(2), 0, 3);
+        assert_eq!(ids(&queue), ["b", "c", "d", "a"]);
+        assert_eq!(current, Some(1));
+
+        // A track from below it moves above it, so a gap opens ahead.
+        let mut queue = vec![track("a"), track("b"), track("c"), track("d")];
+        let current = queue_reorder(&mut queue, Some(2), 3, 0);
+        assert_eq!(ids(&queue), ["d", "a", "b", "c"]);
+        assert_eq!(current, Some(3));
+
+        // Moving within the same side of it changes nothing.
+        let mut queue = vec![track("a"), track("b"), track("c")];
+        let current = queue_reorder(&mut queue, Some(2), 0, 1);
+        assert_eq!(ids(&queue), ["b", "a", "c"]);
+        assert_eq!(current, Some(2));
+    }
+
+    /// "Play next" goes directly after the playing track, not at the end.
+    #[test]
+    fn play_next_lands_after_the_playing_track() {
+        let mut queue = vec![track("a"), track("b"), track("c")];
+        queue_play_next(&mut queue, Some(1), track("x"));
+        assert_eq!(ids(&queue), ["a", "b", "x", "c"]);
+
+        // With nothing playing it becomes the head of the run.
+        let mut queue = vec![track("a")];
+        queue_play_next(&mut queue, None, track("x"));
+        assert_eq!(ids(&queue), ["x", "a"]);
+    }
+
+    /// A move or a removal that points outside the queue must do nothing rather
+    /// than panic.
+    #[test]
+    fn out_of_range_edits_are_ignored() {
+        let mut queue = vec![track("a")];
+        assert_eq!(
+            queue_remove(&mut queue, Some(0), 5),
+            Removal::Shifted(Some(0))
+        );
+        assert_eq!(ids(&queue), ["a"]);
+        assert_eq!(queue_reorder(&mut queue, Some(0), 0, 9), Some(0));
+        assert_eq!(ids(&queue), ["a"]);
     }
 }
 

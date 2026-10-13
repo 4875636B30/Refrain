@@ -684,6 +684,15 @@ pub struct RowOutcome {
     pub add_to_playlist: bool,
     /// "Remove from this playlist" was chosen from the row's context menu.
     pub remove_from_playlist: bool,
+    /// "Play next" was chosen: put this track straight after the one playing.
+    pub play_next: bool,
+    /// "Add to queue" was chosen.
+    pub add_to_queue: bool,
+    /// "Remove from queue" was chosen (queue rows only).
+    pub remove_from_queue: bool,
+    /// "Move up" / "Move down" were chosen (queue rows only).
+    pub move_up: bool,
+    pub move_down: bool,
 }
 
 /// YouTube Music marks the playing row with a small equaliser where the track
@@ -733,6 +742,10 @@ pub fn list_row(
     active: bool,
     // `can_remove` offers "remove from this playlist" in the context menu.
     can_remove: bool,
+    // `can_queue` offers "play next" and "add to queue" anywhere; `in_queue`
+    // offers the queue's own edits, which only make sense for a row in it.
+    can_queue: bool,
+    in_queue: bool,
     playable: bool,
     navigable: bool,
 ) -> RowOutcome {
@@ -825,7 +838,23 @@ pub fn list_row(
     // offers things which do nothing is worse than no menu.
     let mut add_to_playlist = false;
     let mut remove_from_playlist = false;
+    let mut play_next = false;
+    let mut add_to_queue = false;
+    let mut remove_from_queue = false;
+    let mut move_up = false;
+    let mut move_down = false;
     response.context_menu(|ui| {
+        if can_queue {
+            if ui.button("Play next").clicked() {
+                play_next = true;
+                ui.close();
+            }
+            if ui.button("Add to queue").clicked() {
+                add_to_queue = true;
+                ui.close();
+            }
+            ui.separator();
+        }
         if ui.button("Add to playlist…").clicked() {
             add_to_playlist = true;
             ui.close();
@@ -833,6 +862,23 @@ pub fn list_row(
         if can_remove && ui.button("Remove from this playlist").clicked() {
             remove_from_playlist = true;
             ui.close();
+        }
+        if in_queue {
+            ui.separator();
+            // Offered at the ends too: the move is clamped, and a menu that
+            // greys out depending on where you right-clicked reads as broken.
+            if ui.button("Move up").clicked() {
+                move_up = true;
+                ui.close();
+            }
+            if ui.button("Move down").clicked() {
+                move_down = true;
+                ui.close();
+            }
+            if ui.button("Remove from queue").clicked() {
+                remove_from_queue = true;
+                ui.close();
+            }
         }
     });
 
@@ -842,6 +888,11 @@ pub fn list_row(
         link,
         add_to_playlist,
         remove_from_playlist,
+        play_next,
+        add_to_queue,
+        remove_from_queue,
+        move_up,
+        move_down,
     }
 }
 
