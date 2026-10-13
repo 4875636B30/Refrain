@@ -395,7 +395,10 @@ impl Demo {
 
     /// The shortest gap between steps, so they are visible rather than
     /// instantaneous — this is a recording, after all.
-    const STEP_GAP: Duration = Duration::from_millis(1200);
+    /// The minimum time a step is held before the next one runs, so the viewer
+    /// registers it. Long enough to read, short enough that a recording does
+    /// not sit still — the readiness check below is what actually gates a step.
+    const STEP_GAP: Duration = Duration::from_millis(700);
 }
 
 /// The "add to playlist" dialog.
@@ -4023,9 +4026,11 @@ impl App {
         // for a repaint, and a sleeping UI never ticks the demo: the first
         // recording sat on the search results for sixteen seconds because the
         // step that opens an album was only reached when something else
-        // happened to wake the app. Slow enough not to spin — a demo wants a
-        // few frames a second, not a busy loop.
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // happened to wake the app. Thirty frames a second rather than ten,
+        // because a demo exists to be recorded: at ten the equaliser and the
+        // panel sliding open are the only things that move, and both read as
+        // jank in a recording that is meant to show the app at its best.
+        ctx.request_repaint_after(Duration::from_millis(33));
         let waited = demo.step_started.elapsed();
         if waited < Demo::STEP_GAP {
             return;
