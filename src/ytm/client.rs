@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::auth::CookieJar;
 
-use super::domain::{LikeStatus, Page, SearchItem, Shelf};
+use super::domain::{LikeStatus, Lyrics, Page, SearchItem, Shelf};
 use super::extract;
 
 const ENDPOINT_BASE: &str = "https://music.youtube.com/youtubei/v1";
@@ -245,6 +245,25 @@ impl Client {
         }
         serde_json::from_str(&body_text)
             .with_context(|| format!("decoding {endpoint} JSON response"))
+    }
+
+    /// A track's lyrics, if it has any.
+    ///
+    /// Two requests: the watch-next response lists the tabs, and the lyrics one
+    /// is a browse endpoint rather than the words themselves. A track without
+    /// lyrics has no such tab, which is the common case for instrumentals.
+    pub async fn lyrics(&self, video_id: &str) -> Result<Option<Lyrics>> {
+        let player = self.post("next", json!({ "videoId": video_id })).await?;
+        let Some(browse_id) = extract::lyrics_browse_id(&player) else {
+            return Ok(None);
+        };
+        let page = self
+            .post("browse", json!({ "browseId": browse_id }))
+            .await?;
+        Ok(extract::parse_lyrics(&page).map(|text| Lyrics {
+            text,
+            source: extract::lyrics_source(&page),
+        }))
     }
 
     /// How the signed-in listener rated a track, and whether rating is allowed.

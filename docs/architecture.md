@@ -357,6 +357,29 @@ same reason. It is also why the runtime is worth *naming* in diagnostics:
 `--canary` reports which one was found, and fails when there is none, which is
 what keeps a release from shipping without one.
 
+## Lyrics
+
+Two requests, and neither is the one you would expect:
+
+1. The watch-next response — the same one the like status comes from — lists
+   the player's tabs. A track with lyrics has a "Lyrics" tab whose endpoint is
+   a browse with `MUSIC_PAGE_TYPE_TRACK_LYRICS`; a track without has no such
+   tab, which is the usual case for instrumentals.
+2. Following that browse id returns a `musicDescriptionShelfRenderer` holding
+   the words as text runs, newlines and all, plus a footer crediting the
+   source.
+
+The catch: **there is no timing in either response.** YouTube Music's web
+client shows synced lyrics, but it does not get them from here, and nothing in
+this API surface carries them. So the panel shows the words as words. Anything
+else would be inventing a sync.
+
+One subtlety worth keeping: an album's Wikipedia summary is *also* a
+`musicDescriptionShelfRenderer`, so `parse_lyrics` picks the shelf by shape —
+the collapsible one with a source credit, not the one with a "more" button.
+Reading the wrong one shows an album blurb as the words of a song, which the
+fixture test for it catches.
+
 ## Updating itself
 
 Settings checks GitHub for a newer release — once a day automatically, and

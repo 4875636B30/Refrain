@@ -968,6 +968,46 @@ pub fn search_field(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
     submitted
 }
 
+/// A tab: underlined when it is the one you are looking at.
+pub fn tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::proportional(15.0),
+        visuals.text_color(),
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x, CONTROL_HEIGHT * 0.85),
+        egui::Sense::click(),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let colour = if selected {
+        visuals.strong_text_color()
+    } else if response.hovered() {
+        visuals.text_color()
+    } else {
+        visuals.weak_text_color()
+    };
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        colour,
+    );
+    if selected {
+        ui.painter().hline(
+            egui::Rangef::new(rect.left(), rect.right()),
+            rect.bottom() - 2.0,
+            egui::Stroke::new(2.0, ACCENT),
+        );
+    }
+    response
+}
+
 /// A rounded panel grouping related settings.
 pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let visuals = ui.visuals().clone();

@@ -61,6 +61,10 @@ SONGS_PARAMS = "EgWKAQIIAWoSEAUQCRADEAoQBBAQEBUQDhAR"
 # nobody's library is involved.
 QUERY = "daft punk"
 
+# The second track of that album, which has lyrics. The first does not, which
+# is why the tests also cover a track with no lyrics tab at all.
+LYRICS_TRACK = "ajGKWk0auOc"
+
 DROP_KEYS = {"trackingParams", "frameworkUpdates"}
 
 FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -146,7 +150,44 @@ def main() -> int:
         if kind in ids:
             save(f"browse_{kind}", post("browse", {"browseId": ids[kind]}))
     save("browse_home", post("browse", {"browseId": "FEmusic_home"}))
+
+    # The player response and the lyrics page it points at. The watch-next
+    # response carries no words itself — only a browse endpoint for a track
+    # that has them — so both halves are kept.
+    player = post("next", {"videoId": LYRICS_TRACK})
+    save("next", player)
+    lyrics_id = lyrics_browse_id(player)
+    print(f"  lyrics browse id: {lyrics_id}")
+    if lyrics_id:
+        save("lyrics", post("browse", {"browseId": lyrics_id}))
     return 0
+
+
+def lyrics_browse_id(node) -> str | None:
+    found = None
+
+    def walk(value) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if isinstance(value, dict):
+            endpoint = value.get("browseEndpoint")
+            if isinstance(endpoint, dict):
+                config = (
+                    endpoint.get("browseEndpointContextSupportedConfigs", {})
+                    .get("browseEndpointContextMusicConfig", {})
+                )
+                if config.get("pageType") == "MUSIC_PAGE_TYPE_TRACK_LYRICS":
+                    found = endpoint.get("browseId")
+                    return
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(node)
+    return found
 
 
 if __name__ == "__main__":

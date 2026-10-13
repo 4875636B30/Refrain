@@ -80,6 +80,14 @@ impl PageKind {
     }
 }
 
+/// A track's lyrics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lyrics {
+    pub text: String,
+    /// Who the words are licensed from, as the page credits it.
+    pub source: Option<String>,
+}
+
 /// A titled group of browsable tiles (albums, playlists, artists…).
 #[derive(Clone, Debug)]
 pub struct Shelf {

@@ -78,6 +78,13 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.9" date="2026-10-13">
+      <description>
+        <p>Lyrics for the track that is playing, in a tab beside the queue.
+           Plain text: the responses YouTube serves carry no timing, so there
+           is nothing to follow along with.</p>
+      </description>
+    </release>
     <release version="0.1.8" date="2026-10-13">
       <description>
         <p>The category selector is its own control beside the search field

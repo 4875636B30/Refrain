@@ -5,4 +5,4 @@ pub mod domain;
 pub mod extract;
 
 pub use client::{Client, SearchFilter};
-pub use domain::{ItemKind, Page, SearchItem, Track};
+pub use domain::{ItemKind, Lyrics, Page, SearchItem, Track};

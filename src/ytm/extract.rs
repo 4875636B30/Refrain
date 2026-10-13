@@ -762,6 +762,96 @@ pub fn parse_page(browse_id: &str, v: &Value) -> Page {
 /// `INDIFFERENT` / `LIKE` / `DISLIKE`, next to whether rating is allowed at all.
 /// Missing entirely (older or reshuffled responses) reads as "not rated, and
 /// not rateable", which is the safe direction to fail in.
+/// The browse id of a track's lyrics page, if the player response offers one.
+///
+/// The watch-next response lists its tabs, and the lyrics one carries a browse
+/// endpoint rather than any words itself, so the text takes a second request.
+/// A track without lyrics simply has no such tab.
+pub fn lyrics_browse_id(v: &Value) -> Option<String> {
+    let mut found = None;
+    collect_lyrics_id(v, &mut found);
+    found
+}
+
+/// Whether this description shelf is a lyrics page rather than a blurb.
+///
+/// Both use `musicDescriptionShelfRenderer`: an album's Wikipedia summary is
+/// one, and so is a lyrics page. The lyrics shelf is the collapsible one with
+/// a source credit; a blurb offers a "more" button instead. Reading the wrong
+/// one would show an album's description as the words of a song, which is
+/// exactly what the test for this caught.
+fn is_lyrics_shelf(shelf: &Value) -> bool {
+    let has = |key: &str| shelf.get(key).is_some();
+    (has("maxExpandedLines") || has("footer")) && !has("moreButton")
+}
+
+fn collect_lyrics_id(node: &Value, found: &mut Option<String>) {
+    if found.is_some() {
+        return;
+    }
+    match node {
+        Value::Object(map) => {
+            if let Some(endpoint) = map.get("browseEndpoint").and_then(Value::as_object) {
+                let page_type = endpoint
+                    .get("browseEndpointContextSupportedConfigs")
+                    .and_then(|configs| configs.get("browseEndpointContextMusicConfig"))
+                    .and_then(|music| music.get("pageType"))
+                    .and_then(Value::as_str);
+                if page_type == Some("MUSIC_PAGE_TYPE_TRACK_LYRICS")
+                    && let Some(id) = endpoint.get("browseId").and_then(Value::as_str)
+                {
+                    *found = Some(id.to_string());
+                    return;
+                }
+            }
+            for value in map.values() {
+                collect_lyrics_id(value, found);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_lyrics_id(item, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The words themselves, from the page [`lyrics_browse_id`] points at.
+///
+/// The page is a description shelf holding the lyrics as text runs, newlines
+/// and all. YouTube's web response carries no timing with them, so there is
+/// nothing to follow along with — the text is all there is.
+pub fn parse_lyrics(v: &Value) -> Option<String> {
+    let shelf = find_renderers(v, "musicDescriptionShelfRenderer")
+        .into_iter()
+        .find(|shelf| is_lyrics_shelf(shelf))?;
+    let runs = shelf.get("description")?.get("runs")?.as_array()?;
+    let mut text = String::new();
+    for run in runs {
+        if let Some(part) = run.get("text").and_then(Value::as_str) {
+            text.push_str(part);
+        }
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Who the lyrics are licensed from, as the page credits it.
+pub fn lyrics_source(v: &Value) -> Option<String> {
+    let shelf = find_renderers(v, "musicDescriptionShelfRenderer")
+        .into_iter()
+        .find(|shelf| is_lyrics_shelf(shelf))?;
+    let runs = shelf.get("footer")?.get("runs")?.as_array()?;
+    let mut text = String::new();
+    for run in runs {
+        if let Some(part) = run.get("text").and_then(Value::as_str) {
+            text.push_str(part);
+        }
+    }
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 pub fn parse_like_status(v: &Value) -> (LikeStatus, bool) {
     let Some(button) = find_first(v, "likeButtonRenderer") else {
         return (LikeStatus::Indifferent, false);
@@ -1033,6 +1123,40 @@ mod captured {
             assert!(!shelf.title.is_empty(), "a shelf with no title");
             assert!(!shelf.items.is_empty(), "shelf {:?} is empty", shelf.title);
         }
+    }
+
+    #[test]
+    fn a_player_response_points_at_the_lyrics_page() {
+        let id = lyrics_browse_id(&fixture("next")).expect("this track has lyrics");
+        assert!(id.starts_with("MPLYt"), "unexpected lyrics id: {id}");
+    }
+
+    #[test]
+    fn the_lyrics_page_holds_the_words() {
+        let value = fixture("lyrics");
+        let text = parse_lyrics(&value).expect("the page should carry lyrics");
+        assert!(
+            text.lines().count() >= 8,
+            "only {} lines",
+            text.lines().count()
+        );
+        assert!(
+            text.contains('\n'),
+            "the words should keep their line breaks"
+        );
+        assert_eq!(
+            lyrics_source(&value).as_deref(),
+            Some("Source: Musixmatch"),
+            "the credit should come through"
+        );
+    }
+
+    /// A track without lyrics has no tab to follow, and the parser has to say
+    /// so rather than inventing an empty page.
+    #[test]
+    fn a_track_without_lyrics_offers_no_page() {
+        assert_eq!(lyrics_browse_id(&fixture("browse_album")), None);
+        assert_eq!(parse_lyrics(&fixture("browse_album")), None);
     }
 
     /// Every test above would pass by finding nothing if a fixture stopped

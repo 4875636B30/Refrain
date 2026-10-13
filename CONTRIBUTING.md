@@ -138,8 +138,10 @@ open an issue saying which one you are taking.
 - **An offline view.** `--download` caches a track, and the cache is budgeted and
   pruned, but nothing in the UI lists what is cached or offers to keep it. A
   "Downloads" list in the sidebar would make the offline story real.
-- **Lyrics.** Not implemented at all. The `next` endpoint carries them for much
-  of the catalogue.
+- **Timed lyrics.** The words are fetched and shown, but the timing is not:
+  YouTube's web responses carry none, and its own client gets synced lyrics
+  from somewhere else. Finding that source — another client identity, another
+  endpoint — is what would let the panel follow along.
 
 **Larger, or needs care**
 

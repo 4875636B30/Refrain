@@ -36,6 +36,7 @@ password to hand over.
 | **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
 | **Themes** | Light and dark, persisted in the config. Roboto is bundled, so it looks the same on every desktop. |
 | **Settings** | Theme, sign-in source, cache size and clearing it, yt-dlp status, and updates — all in-app, no config editing. |
+| **Lyrics** | The words for the track that is playing, in the panel beside the queue. Plain text: YouTube's response carries no timing, so there is nothing to follow along with. |
 | **Updates** | Settings checks for a newer release once a day, or on demand, and installs it in place where that is safe. The download is checked against the published `.sha256` first. |
 | **Keyboard** | Space, arrows, `Shift`+arrows, `/` and `Esc` — see [shortcuts](#keyboard-shortcuts). |
 

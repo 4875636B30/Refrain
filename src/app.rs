@@ -25,7 +25,7 @@ use crate::thumbs;
 use crate::ui;
 use crate::update;
 use crate::ytm::domain::LikeStatus;
-use crate::ytm::{Client, ItemKind, Page, SearchFilter, SearchItem, Track};
+use crate::ytm::{Client, ItemKind, Lyrics, Page, SearchFilter, SearchItem, Track};
 
 enum Msg {
     Search(Result<SearchResults, String>),
@@ -66,6 +66,8 @@ enum Msg {
     PlaylistEdited(Result<String, String>),
     /// The version the chosen yt-dlp reports, for the settings window.
     YtdlpVersion(Option<String>),
+    /// The lyrics for the current track, or why there are none.
+    Lyrics(Result<Option<Lyrics>, String>),
     /// The answer to "is there a newer release", or why we could not ask.
     UpdateChecked(Result<Option<update::Release>, String>),
     /// The result of installing one, with the version it was.
@@ -404,6 +406,18 @@ enum Advance {
 /// Kept apart from the UI loop so the rules are actually testable: repeat-one
 /// always wins, shuffle supplies its own index, and repeat-all wraps at the
 /// end of the queue. Getting this wrong is invisible until a queue ends.
+/// What the lyrics panel has for the track that is playing.
+#[derive(Clone, Debug, PartialEq)]
+enum LyricsState {
+    /// Not asked for yet.
+    Idle,
+    Loading,
+    /// The track has none — instrumentals mostly.
+    None,
+    Ready(Lyrics),
+    Failed(String),
+}
+
 /// Seconds since the epoch, for the update-check throttle.
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -664,6 +678,11 @@ pub struct App {
     last_prune: Instant,
     /// Whether the "Up next" queue panel is showing.
     show_queue: bool,
+    /// Whether the panel is showing lyrics rather than the queue.
+    show_lyrics: bool,
+    lyrics: LyricsState,
+    /// Which track the lyrics in hand belong to, so they are fetched once.
+    lyrics_for: Option<String>,
     /// Whether the sign-in attempt has finished, successfully or not. The demo
     /// waits for this: signing in re-runs the last search, which would otherwise
     /// yank the view back while the script is navigating.
@@ -864,6 +883,9 @@ impl App {
             cache_inflight: Arc::new(Mutex::new(HashSet::new())),
             last_prune: Instant::now(),
             show_queue: false,
+            show_lyrics: false,
+            lyrics: LyricsState::Idle,
+            lyrics_for: None,
             picker: None,
             renaming: None,
             deleting: None,
@@ -1643,6 +1665,13 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::YtdlpVersion(version) => self.ytdlp_version = version,
+                Msg::Lyrics(result) => {
+                    self.lyrics = match result {
+                        Ok(Some(lyrics)) => LyricsState::Ready(lyrics),
+                        Ok(None) => LyricsState::None,
+                        Err(why) => LyricsState::Failed(why),
+                    };
+                }
                 Msg::UpdateChecked(Ok(Some(release))) => {
                     self.update_state = UpdateState::Available(release);
                 }
@@ -3689,6 +3718,79 @@ impl App {
         }
     }
 
+    /// Fetch lyrics for the track that is playing, once per track, and only
+    /// while the lyrics tab is the one being looked at.
+    fn tick_lyrics(&mut self, ctx: &egui::Context) {
+        if !self.show_lyrics {
+            return;
+        }
+        let Some(track) = self.audio.as_ref().and_then(|a| a.now_playing.clone()) else {
+            return;
+        };
+        if self.lyrics_for.as_deref() == Some(track.video_id.as_str()) {
+            return;
+        }
+        self.lyrics_for = Some(track.video_id.clone());
+        self.lyrics = LyricsState::Loading;
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = client
+                .lyrics(&track.video_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Lyrics(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The words, or why there are none.
+    ///
+    /// One label for the whole song, rather than one per line. egui wraps a
+    /// label inside a vertical layout but not inside a horizontal one, and
+    /// building this out of a line-per-label inside a horizontal is what made
+    /// the longer lines clip at the panel edge. The blank lines in the text
+    /// are the stanza breaks, and a label keeps them.
+    fn lyrics_view(&self, ui: &mut egui::Ui) {
+        let width = ui.available_width();
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_max_width(width);
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: 14,
+                        right: 14,
+                        top: 0,
+                        bottom: 0,
+                    })
+                    .show(ui, |ui| match &self.lyrics {
+                        LyricsState::Idle | LyricsState::Loading => {
+                            ui.label(RichText::new("Looking for lyrics…").weak().small());
+                        }
+                        LyricsState::None => {
+                            ui.label(RichText::new("This track has no lyrics.").weak().small());
+                        }
+                        LyricsState::Failed(why) => {
+                            ui.label(
+                                RichText::new(format!("Could not fetch lyrics: {why}"))
+                                    .color(ui::WARN)
+                                    .small(),
+                            );
+                        }
+                        LyricsState::Ready(lyrics) => {
+                            ui.label(RichText::new(&lyrics.text).size(14.0));
+                            if let Some(source) = &lyrics.source {
+                                ui.add_space(12.0);
+                                ui.label(RichText::new(source.clone()).weak().small());
+                            }
+                        }
+                    });
+            });
+    }
+
     /// Keep the displayed rating in step with the track that is playing.
     fn tick_like_status(&mut self, ctx: &egui::Context) {
         if !self.authenticated || self.like_inflight {
@@ -3743,16 +3845,28 @@ impl App {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.label(ui::title("Up next").size(17.0));
+            if ui::tab(ui, "Up next", !self.show_lyrics).clicked() {
+                self.show_lyrics = false;
+            }
+            ui.add_space(12.0);
+            if ui::tab(ui, "Lyrics", self.show_lyrics).clicked() {
+                self.show_lyrics = true;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(14.0);
-                ui.label(
-                    RichText::new(format!("{} in queue", self.queue.len()))
-                        .weak()
-                        .small(),
-                );
+                if !self.show_lyrics {
+                    ui.label(
+                        RichText::new(format!("{} in queue", self.queue.len()))
+                            .weak()
+                            .small(),
+                    );
+                }
             });
         });
+        if self.show_lyrics {
+            self.lyrics_view(ui);
+            return;
+        }
         ui.add_space(8.0);
 
         if self.queue.is_empty() {
@@ -4098,6 +4212,7 @@ impl eframe::App for App {
         self.tick_playback(&ctx);
         self.tick_deferred_play(&ctx);
         self.tick_like_status(&ctx);
+        self.tick_lyrics(&ctx);
         self.tick_media();
         self.tick_demo(&ctx);
         self.playlist_picker(&ctx);
