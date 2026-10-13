@@ -399,6 +399,23 @@ enum Advance {
 /// Kept apart from the UI loop so the rules are actually testable: repeat-one
 /// always wins, shuffle supplies its own index, and repeat-all wraps at the
 /// end of the queue. Getting this wrong is invisible until a queue ends.
+/// Which queue entry a track belongs at after the output device was rebuilt.
+///
+/// The device dying does not invalidate the run: the queue and the index into
+/// it are still good, so the recovered track keeps its place and the rest of
+/// the queue still plays after it. Rebuilding around a single track instead —
+/// which is what this used to do — meant that when the recovered track ended,
+/// there was nothing left to advance to and playback stopped for good.
+///
+/// `None` means the queue no longer holds this track, and the caller has to
+/// start a new run.
+fn recovery_index(queue: &[Track], current: Option<usize>, video_id: &str) -> Option<usize> {
+    match current {
+        Some(index) if queue.get(index).is_some_and(|t| t.video_id == video_id) => Some(index),
+        _ => None,
+    }
+}
+
 fn advance_decision(
     repeat: Repeat,
     shuffle_index: Option<usize>,
@@ -1551,6 +1568,16 @@ impl App {
                 self.audio = Some(fresh);
                 self.status = Some("Audio device restarted".to_string());
                 if let Some((track, position)) = resume {
+                    let index = match recovery_index(&self.queue, self.current, &track.video_id) {
+                        Some(index) => index,
+                        // The queue no longer holds it, so there is nothing to
+                        // advance through: make it the whole run rather than
+                        // playing something unrelated.
+                        None => {
+                            self.queue = vec![track.clone()];
+                            0
+                        }
+                    };
                     let path = resolver::cache_path(&track.video_id);
                     if path.exists() {
                         // Resume the cached file where we left off.
@@ -1558,13 +1585,10 @@ impl App {
                             let _ = audio.play_file(&path, track.clone());
                             audio.seek(position);
                         }
-                        self.queue = vec![track];
-                        self.current = Some(0);
                         self.advance_armed = true;
                     } else {
                         // A stream can't be resumed, so start it again.
-                        self.queue = vec![track];
-                        self.play_index(ctx, 0);
+                        self.play_index(ctx, index);
                     }
                 }
             }
@@ -3900,6 +3924,42 @@ fn detail_header(ui: &mut egui::Ui, page: &Page, thumbs: &HashMap<String, egui::
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(4.0);
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn track(id: &str) -> Track {
+        Track {
+            video_id: id.to_string(),
+            title: id.to_string(),
+            artists: Vec::new(),
+            artist_ids: Vec::new(),
+            album: None,
+            duration_secs: None,
+            set_video_id: None,
+            thumbnail: None,
+        }
+    }
+
+    /// A device rebuild used to replace the queue with the recovered track
+    /// alone, so when that track ended there was nothing to play next and
+    /// playback stopped for good. The queue is still valid: the index survives.
+    #[test]
+    fn a_recovered_track_keeps_its_place_in_the_queue() {
+        let queue = vec![track("a"), track("b"), track("c")];
+        assert_eq!(recovery_index(&queue, Some(1), "b"), Some(1));
+        assert_eq!(recovery_index(&queue, Some(0), "a"), Some(0));
+    }
+
+    #[test]
+    fn a_queue_without_the_track_starts_a_new_run() {
+        let queue = vec![track("a"), track("b")];
+        assert_eq!(recovery_index(&queue, Some(1), "gone"), None);
+        assert_eq!(recovery_index(&queue, None, "b"), None);
+        assert_eq!(recovery_index(&[], Some(0), "b"), None);
+    }
 }
 
 #[cfg(test)]

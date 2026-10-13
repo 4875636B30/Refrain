@@ -78,6 +78,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.6" date="2026-10-13">
+      <description>
+        <p>Playback keeps the queue when the audio device is rebuilt. It used
+           to resume the current track but forget everything after it, so
+           playback stopped for good when that track ended — after a suspend,
+           a headset switch, or the sound server restarting.</p>
+      </description>
+    </release>
     <release version="0.1.5" date="2026-10-13">
       <description>
         <p>The volume is saved when you change it. It used to be written only
