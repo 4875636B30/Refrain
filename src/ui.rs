@@ -981,6 +981,63 @@ pub fn search_field(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
     submitted
 }
 
+/// Momentum for a scroll area the app drives itself.
+///
+/// egui smooths a wheel notch over a few frames and then stops — nothing
+/// carries the content on after the input ends, which is what a trackpad does
+/// and a wheel does not. This keeps the velocity and lets it decay, so a few
+/// notches glide to rest instead of stopping dead.
+///
+/// Per scroll area on purpose: egui's own `smooth_scroll_delta` is global, and
+/// whichever scroll area runs first in the frame consumes and zeroes it —
+/// which is not necessarily the one under the pointer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrollMomentum {
+    velocity: f32,
+    offset: f32,
+}
+
+impl ScrollMomentum {
+    /// Add wheel movement, in points. Positive scrolls down.
+    pub fn push(&mut self, points: f32) {
+        // Added to what is left over, so spinning the wheel gathers speed the
+        // way a flick does.
+        self.velocity += points;
+    }
+
+    /// Advance by `dt` seconds and return the offset to scroll to.
+    ///
+    /// `content` and `viewport` come from the previous frame, which is what
+    /// keeps the glide from running past the end of the list.
+    pub fn advance(&mut self, dt: f32, content: f32, viewport: f32) -> f32 {
+        let max = (content - viewport).max(0.0);
+        self.offset = (self.offset + self.velocity * dt).clamp(0.0, max);
+        // Exponential decay, so it behaves the same at any frame rate.
+        const DECAY_PER_SECOND: f32 = 0.0002;
+        self.velocity *= DECAY_PER_SECOND.powf(dt.clamp(0.0, 0.1));
+        if self.velocity.abs() < 0.5 {
+            self.velocity = 0.0;
+        }
+        // At an end there is nowhere to go: stop rather than lean on it.
+        if (self.offset <= 0.0 && self.velocity < 0.0)
+            || (self.offset >= max && self.velocity > 0.0)
+        {
+            self.velocity = 0.0;
+        }
+        self.offset
+    }
+
+    /// Whether the glide is still going, for asking for the next frame.
+    pub fn is_gliding(&self) -> bool {
+        self.velocity != 0.0
+    }
+
+    /// Follow the view when something else moved it, such as the scroll bar.
+    pub fn set_offset(&mut self, offset: f32) {
+        self.offset = offset;
+    }
+}
+
 /// A tab: underlined when it is the one you are looking at.
 pub fn tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let visuals = ui.visuals().clone();
@@ -1231,4 +1288,51 @@ pub fn cover_grid(
         ui.add_space(4.0);
     }
     clicked
+}
+
+#[cfg(test)]
+mod momentum_tests {
+    use super::ScrollMomentum;
+
+    #[test]
+    fn a_flick_glides_and_stops() {
+        let mut momentum = ScrollMomentum::default();
+        momentum.push(400.0);
+        let mut last = 0.0;
+        for _ in 0..120 {
+            let offset = momentum.advance(1.0 / 60.0, 5000.0, 600.0);
+            assert!(offset >= last, "the glide should not reverse");
+            last = offset;
+        }
+        assert!(last > 10.0, "a flick should move: {last}");
+        assert!(!momentum.is_gliding(), "it should come to rest");
+    }
+
+    #[test]
+    fn notches_gather_speed_rather_than_replace_each_other() {
+        let mut twice = ScrollMomentum::default();
+        twice.push(200.0);
+        twice.push(200.0);
+        let mut once = ScrollMomentum::default();
+        once.push(200.0);
+        assert!(
+            twice.advance(0.016, 5000.0, 600.0) > once.advance(0.016, 5000.0, 600.0),
+            "two notches should carry further than one"
+        );
+    }
+
+    #[test]
+    fn the_glide_stops_at_the_end_of_the_list() {
+        let mut momentum = ScrollMomentum::default();
+        momentum.push(100_000.0);
+        assert_eq!(momentum.advance(1.0 / 60.0, 1000.0, 600.0), 400.0);
+        assert!(!momentum.is_gliding(), "and it stops leaning on the end");
+    }
+
+    #[test]
+    fn a_list_shorter_than_the_view_does_not_move() {
+        let mut momentum = ScrollMomentum::default();
+        momentum.push(500.0);
+        assert_eq!(momentum.advance(1.0 / 60.0, 300.0, 600.0), 0.0);
+    }
 }

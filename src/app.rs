@@ -687,6 +687,10 @@ pub struct App {
     lyrics_for: Option<String>,
     /// Keep playing similar music when the queue runs out.
     autoplay: bool,
+    /// Momentum for the main feed: egui stops with the wheel, this glides.
+    feed_momentum: ui::ScrollMomentum,
+    /// The feed's content and viewport sizes, from the last frame.
+    feed_extent: (f32, f32),
     /// `--fps`: report the frame rate the platform actually delivers.
     fps_probe: bool,
     fps_frames: u32,
@@ -900,6 +904,8 @@ impl App {
             lyrics: LyricsState::Idle,
             lyrics_for: None,
             autoplay: cfg.ui.autoplay,
+            feed_momentum: ui::ScrollMomentum::default(),
+            feed_extent: (0.0, 0.0),
             fps_probe: std::env::args().any(|arg| arg == "--fps"),
             fps_frames: 0,
             fps_since: Instant::now(),
@@ -2679,8 +2685,41 @@ impl App {
                         self.queue_panel(ui, &current_video, &mut action);
                     });
             }
-            egui::ScrollArea::vertical()
+            // Momentum. The wheel is read here and the feed scrolled to the
+            // offset this computes, so a flick keeps going after the last
+            // notch; `mouse_wheel: false` stops egui applying it as well.
+            let dt = ctx.input(|i| i.stable_dt);
+            let feed_rect = ui.available_rect_before_wrap();
+            let over_feed = ctx
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| feed_rect.contains(pos));
+            if over_feed {
+                // `smooth_scroll_delta`, not the raw wheel events: egui has
+                // already converted the notches into points, so there is no
+                // scale to guess. It is read here rather than applied by egui
+                // because the wheel is switched off for this area — the app
+                // owns the movement, which is what lets it carry on.
+                //
+                // Negated because egui's convention is a positive delta moving
+                // the content down, i.e. scrolling *up* the list; it applies
+                // `offset -= delta`, so this has to agree with it.
+                let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
+                if wheel != 0.0 {
+                    self.feed_momentum.push(-(wheel / dt.max(1e-3)));
+                }
+            }
+            let (content, viewport) = self.feed_extent;
+            let offset = self.feed_momentum.advance(dt, content, viewport);
+            if self.feed_momentum.is_gliding() {
+                ctx.request_repaint();
+            }
+            let feed = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .scroll_source(egui::scroll_area::ScrollSource {
+                    mouse_wheel: false,
+                    ..Default::default()
+                })
+                .vertical_scroll_offset(offset)
                 .show(ui, |ui| match &view {
                     View::Search => self.results_view(
                         ui,
@@ -2693,6 +2732,8 @@ impl App {
                         self.detail_view(ui, page, &current_video, &mut action, &mut hovered)
                     }
                 });
+            self.feed_extent = (feed.content_size.y, feed.inner_rect.height());
+            self.feed_momentum.set_offset(feed.state.offset.y);
         });
 
         self.view = view;
