@@ -92,7 +92,7 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// The asset name for a platform, as the release workflow writes them.
-fn asset_name(version: &str, os: &str, arch: &str) -> Option<String> {
+fn asset_name(version: &str, os: &str, arch: &str, appimage: bool) -> Option<String> {
     let target = match (os, arch) {
         ("linux", "x86_64") => format!("linux-{arch}"),
         ("macos", "aarch64") => "macos-aarch64-apple-darwin".to_string(),
@@ -101,13 +101,46 @@ fn asset_name(version: &str, os: &str, arch: &str) -> Option<String> {
         _ => return None,
     };
     if os == "linux" && arch == "x86_64" {
-        // Linux ships both; prefer the tarball, which is the bundle layout the
-        // updater can replace file by file. The AppImage case is handled
-        // separately, because there the AppImage *is* the installation.
-        return Some(format!("refrain-{version}-{target}.tar.gz"));
+        // Linux ships two, and which one is wanted depends on how the app was
+        // installed: an AppImage *is* the installation, so it needs the
+        // AppImage. Fetching the tarball for it once renamed a gzipped tar over
+        // the AppImage and left a file that could not be executed — "Exec
+        // format error", from a checksum that matched perfectly.
+        return Some(if appimage {
+            format!("refrain-{version}-x86_64.AppImage")
+        } else {
+            format!("refrain-{version}-{target}.tar.gz")
+        });
     }
     let extension = if os == "windows" { "zip" } else { "tar.gz" };
     Some(format!("refrain-{version}-{target}.{extension}"))
+}
+
+/// Whether a download is a file this installation can actually use.
+///
+/// A matching checksum proves it is the asset the release published; it does
+/// not prove it is the *right* asset. That distinction is not theoretical — see
+/// the note above about a tarball renamed over an AppImage — so the first bytes
+/// are checked before anything is replaced.
+fn looks_right(path: &Path, kind: &InstallKind) -> Result<(), String> {
+    use std::io::Read as _;
+    let mut magic = [0u8; 4];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| file.read(&mut magic))
+        .map_err(|e| format!("could not read the download back: {e}"))?;
+    let magic = &magic[..read];
+    let wanted: &[u8] = match kind {
+        InstallKind::AppImage(_) => b"\x7fELF",
+        InstallKind::Bundle(_) => b"\x1f\x8b",
+        InstallKind::Managed | InstallKind::Download => return Ok(()),
+    };
+    if magic.starts_with(wanted) {
+        return Ok(());
+    }
+    Err(match kind {
+        InstallKind::AppImage(_) => "the download is not an AppImage".to_string(),
+        _ => "the download is not a tarball".to_string(),
+    })
 }
 
 /// How this installation should be updated, from where it runs.
@@ -142,7 +175,11 @@ pub fn install_kind() -> InstallKind {
 }
 
 /// Ask GitHub for the latest release, and whether it is newer than `current`.
-pub async fn check(http: &reqwest::Client, current: &str) -> Result<Option<Release>, String> {
+pub async fn check(
+    http: &reqwest::Client,
+    current: &str,
+    appimage: bool,
+) -> Result<Option<Release>, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let response = http
         .get(&url)
@@ -174,14 +211,19 @@ pub async fn check(http: &reqwest::Client, current: &str) -> Result<Option<Relea
         return Ok(None);
     }
 
-    let wanted =
-        asset_name(&version, std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
-            format!(
-                "no build for {}/{}",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            )
-        })?;
+    let wanted = asset_name(
+        &version,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        appimage,
+    )
+    .ok_or_else(|| {
+        format!(
+            "no build for {}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
     let assets = body
         .get("assets")
         .and_then(Value::as_array)
@@ -299,6 +341,10 @@ pub async fn install(
     if expected.is_empty() || expected != actual {
         let _ = std::fs::remove_file(&staged);
         return Err("the download does not match its published checksum".to_string());
+    }
+    if let Err(why) = looks_right(&staged, kind) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("{why}, so nothing was replaced"));
     }
 
     match kind {
@@ -456,18 +502,62 @@ mod tests {
     #[test]
     fn the_asset_matches_the_platform() {
         assert_eq!(
-            asset_name("0.1.7", "linux", "x86_64").as_deref(),
+            asset_name("0.1.7", "linux", "x86_64", false).as_deref(),
             Some("refrain-0.1.7-linux-x86_64.tar.gz")
         );
         assert_eq!(
-            asset_name("0.1.7", "macos", "aarch64").as_deref(),
+            asset_name("0.1.7", "macos", "aarch64", false).as_deref(),
             Some("refrain-0.1.7-macos-aarch64-apple-darwin.tar.gz")
         );
         assert_eq!(
-            asset_name("0.1.7", "windows", "x86_64").as_deref(),
+            asset_name("0.1.7", "windows", "x86_64", false).as_deref(),
             Some("refrain-0.1.7-windows-x86_64.zip")
         );
-        assert_eq!(asset_name("0.1.7", "linux", "aarch64"), None);
+        assert_eq!(asset_name("0.1.7", "linux", "aarch64", false), None);
+    }
+
+    /// The bug that produced "Exec format error": an AppImage install fetched
+    /// the tarball and renamed it over the AppImage, leaving a gzipped tar with
+    /// an `.AppImage` name. The checksum matched, because it was the asset the
+    /// release published — just the wrong one.
+    #[test]
+    fn an_appimage_install_asks_for_the_appimage() {
+        assert_eq!(
+            asset_name("0.1.7", "linux", "x86_64", true).as_deref(),
+            Some("refrain-0.1.7-x86_64.AppImage")
+        );
+        // Only Linux ships both, so nothing else changes.
+        assert_eq!(
+            asset_name("0.1.7", "windows", "x86_64", true).as_deref(),
+            Some("refrain-0.1.7-windows-x86_64.zip")
+        );
+    }
+
+    /// And the second line of defence: a file of the wrong shape is refused
+    /// before anything is replaced, whatever its checksum said.
+    #[test]
+    fn a_download_of_the_wrong_shape_is_refused() {
+        let dir = std::env::temp_dir().join("refrain-update-shape");
+        std::fs::create_dir_all(&dir).unwrap();
+        let appimage = dir.join("Refrain.AppImage");
+        let tarball = dir.join("refrain.tar.gz");
+        // The first bytes are what matter; the rest is filler.
+        std::fs::write(&appimage, b"\x7fELF\x02\x01\x01\x00rest").unwrap();
+        std::fs::write(&tarball, b"\x1f\x8b\x08\x00rest").unwrap();
+
+        // Each passes for the install it belongs to.
+        assert!(looks_right(&appimage, &InstallKind::AppImage(appimage.clone())).is_ok());
+        assert!(looks_right(&tarball, &InstallKind::Bundle(dir.clone())).is_ok());
+
+        // And fails for the other. This is the exact mistake that produced
+        // "Exec format error": a tarball where an AppImage was wanted.
+        let wrong = looks_right(&tarball, &InstallKind::AppImage(appimage.clone()));
+        assert!(wrong.is_err(), "a tarball must not pass as an AppImage");
+        assert!(wrong.unwrap_err().contains("not an AppImage"));
+
+        let wrong = looks_right(&appimage, &InstallKind::Bundle(dir.clone()));
+        assert!(wrong.is_err(), "an AppImage must not pass as a tarball");
+        assert!(wrong.unwrap_err().contains("not a tarball"));
     }
 
     /// An AppImage is its own installation: the file the runtime says it is.
@@ -532,7 +622,7 @@ mod tests {
             .expect("client");
         // Pretend to be older than anything published, so a release is always
         // offered and this test does not quietly stop testing anything.
-        let release = check(&http, "0.0.1")
+        let release = check(&http, "0.0.1", false)
             .await
             .expect("the check should succeed")
             .expect("a release should be offered");
@@ -570,7 +660,7 @@ mod tests {
             .user_agent("refrain-update-test")
             .build()
             .expect("client");
-        let mut release = check(&http, "0.0.1")
+        let mut release = check(&http, "0.0.1", false)
             .await
             .expect("check")
             .expect("release");

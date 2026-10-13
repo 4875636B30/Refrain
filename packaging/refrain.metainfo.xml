@@ -78,6 +78,16 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.16" date="2026-10-13">
+      <description>
+        <p>An AppImage install now fetches the AppImage. It used to fetch the
+           tarball and put it in the AppImage's place, which left a file that
+           could not be executed.</p>
+        <p>A download whose contents do not match the kind of installation is
+           refused before anything is replaced, and restarting no longer
+           freezes the window while it watches the new build start.</p>
+      </description>
+    </release>
     <release version="0.1.15" date="2026-10-13">
       <description>
         <p>Scrolling the feed has momentum: a flick glides to rest instead of

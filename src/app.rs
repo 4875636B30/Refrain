@@ -66,6 +66,8 @@ enum Msg {
     PlaylistEdited(Result<String, String>),
     /// The version the chosen yt-dlp reports, for the settings window.
     YtdlpVersion(Option<String>),
+    /// A restart that did not take: the new build started and died.
+    RestartFailed(String),
     /// The lyrics for the current track, or why there are none.
     Lyrics(Result<Option<Lyrics>, String>),
     /// More of the same kind of music, for when a queue runs out.
@@ -1752,6 +1754,7 @@ impl App {
                     };
                 }
                 Msg::UpdateInstalled(Err(why)) => self.update_state = UpdateState::Failed(why),
+                Msg::RestartFailed(why) => self.update_state = UpdateState::Failed(why),
                 Msg::MoreResults(result) => match result {
                     Ok((items, more)) => {
                         // An empty page means there was nothing left to add;
@@ -3145,8 +3148,11 @@ impl App {
         let http = self.img_http.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+        // Which asset to look for depends on how this copy is installed: an
+        // AppImage has to fetch the AppImage, not the tarball.
+        let appimage = matches!(self.update_kind, update::InstallKind::AppImage(_));
         self.rt.spawn(async move {
-            let result = update::check(&http, update::CURRENT).await;
+            let result = update::check(&http, update::CURRENT, appimage).await;
             let _ = tx.send(Msg::UpdateChecked(result));
             ctx.request_repaint();
         });
@@ -3187,7 +3193,7 @@ impl App {
     /// nothing at all, which is what this is here to stop: the child is watched
     /// for a moment, and if it falls over the reason is put in front of the
     /// user rather than into a status line in the corner.
-    fn restart_now(&mut self) {
+    fn restart_now(&mut self, ctx: &egui::Context) {
         let exe = match &self.update_kind {
             update::InstallKind::AppImage(path) => path.clone(),
             _ => std::env::current_exe().unwrap_or_default(),
@@ -3209,21 +3215,26 @@ impl App {
         match command.spawn() {
             Ok(mut child) => {
                 // Ok from spawn only means fork and exec worked. The new build
-                // can still fall over a moment later — a missing library, a
-                // mount that went away — so give it a moment and look.
-                std::thread::sleep(Duration::from_millis(1500));
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        self.update_state = UpdateState::Failed(format!(
-                            "the new build exited immediately ({status})"
-                        ));
-                        self.status = Some(format!(
-                            "The update is at {} — open it again",
-                            exe.display()
-                        ));
+                // can still fall over a moment later, so it is watched for a
+                // moment — off the UI thread, because sleeping here froze the
+                // window for a second and a half, which is what "it stops while
+                // thinking" looked like.
+                self.status = Some("Restarting…".to_string());
+                let tx = self.tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let _ = tx.send(Msg::RestartFailed(format!(
+                                "the new build exited immediately ({status})"
+                            )));
+                            ctx.request_repaint();
+                        }
+                        // Still running: hand over to it.
+                        _ => std::process::exit(0),
                     }
-                    _ => std::process::exit(0),
-                }
+                });
             }
             Err(e) => {
                 self.update_state =
@@ -3665,7 +3676,7 @@ impl App {
             self.spawn_update_install(ctx, release);
         }
         if restart {
-            self.restart_now();
+            self.restart_now(ctx);
         }
         self.show_settings = open;
     }
