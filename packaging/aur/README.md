@@ -24,7 +24,7 @@ the maintainer named in the PKGBUILD.
 git clone ssh://aur@aur.archlinux.org/refrain-music-bin.git
 cp PKGBUILD .SRCINFO refrain-music-bin/
 cd refrain-music-bin && git add PKGBUILD .SRCINFO
-git commit -m "Initial import: refrain-music-bin 0.1.8"
+git commit -m "Initial import: refrain-music-bin 0.1.10"
 git push
 ```
 
