@@ -37,3 +37,7 @@ sha1 = "0.11.0"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
 toml = "1.1.8"
+
+[dev-dependencies]
+# Reading the gzipped fixtures in src/ytm/extract.rs tests.
+flate2 = "1"

@@ -49,6 +49,19 @@ the parser walks the tree looking for renderer names it recognises
 (`musicResponsiveListItemRenderer`, `musicResponsiveHeaderRenderer`, …). Unknown
 wrappers are simply skipped, so the client keeps working when the layout shifts.
 
+The cost of that tolerance is a quiet failure mode: if a renderer is renamed or
+a field moves, extraction returns nothing and the app shows an empty shelf
+rather than an error. So the parsing is tested against **captured responses** —
+real `search` and `browse` payloads in `tests/fixtures/`, gzipped because a
+genuine response is mostly thumbnail URLs. The tests assert the contract the app
+depends on rather than exact content: counts are floors, titles are non-empty,
+ids look like ids. That way re-capturing does not break them unless the shape
+really changed, which is the signal worth having.
+
+`tools/capture-fixtures.py` re-captures them; run it when a fixture test fails,
+and read the diff before committing. The fixtures are anonymous responses, so
+they carry nobody's library.
+
 ### Paging
 
 Feeds, long playlists and expanded search categories all page, but not

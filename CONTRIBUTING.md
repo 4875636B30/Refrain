@@ -51,6 +51,12 @@ cargo test
 All three run in CI, and CI is the gate. `clippy` is set to deny warnings, so a
 warning is a failure.
 
+Some tests run against captured YouTube responses in `tests/fixtures/`. If one
+fails after a change of yours, it is usually telling you the parser stopped
+finding something — read the assertion before assuming the fixture is stale. If
+YouTube really did change shape, re-capture with
+`python3 tools/capture-fixtures.py` and read the diff before committing it.
+
 ## Checking the other platforms
 
 CI builds and tests Linux, macOS and Windows, but that takes a round trip. To
@@ -117,24 +123,18 @@ open an issue saying which one you are taking.
 
 **Good first issues**
 
-- **A cookies-file path field in Settings.** The `file` auth mode works but is
-  config-only: `AuthConfig::cookies_file` has no UI. One text field, saved like
-  the other sign-in choices. Useful for anyone whose browser is somewhere the
-  client cannot reach — a Flatpak, or a browser it does not know.
 - **A like shortcut.** Thumbs already work; there is no key for them. One
   binding in `handle_shortcuts`, next to the existing ones.
-- **`--canary` on macOS and Windows in CI.** It runs in the release workflow
-  already, so the live API and yt-dlp are checked when a tag is pushed — but not
-  on every push. Wiring it into the CI matrix (macOS, Windows) is a few lines,
-  and it is the closest a runner gets to "does it work there".
+- **A fixture for a page type that has none.** `tests/fixtures/` covers search,
+  album, artist, playlist and home. A podcast page, a radio playlist, or a
+  signed-in library page would each be a capture plus a test in
+  `src/ytm/extract.rs`, and `tools/capture-fixtures.py` does the fetching.
+- **Remember the window size and position.** The viewport is fixed at 1120×740
+  in `main.rs`. The config already persists the theme and the volume, so this is
+  two more fields and a `ViewportBuilder` call.
 
 **Medium**
 
-- **Parser fixture tests.** `ytm/extract.rs` is the most fragile part of the
-  project by design — it walks YouTube's response tree by renderer name and
-  skips what it does not recognise, which is what keeps it working when the
-  layout changes. Captured payloads turned into tests would catch *our*
-  regressions; the canary catches YouTube's.
 - **An offline view.** `--download` caches a track, and the cache is budgeted and
   pruned, but nothing in the UI lists what is cached or offers to keep it. A
   "Downloads" list in the sidebar would make the offline story real.

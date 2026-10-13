@@ -844,3 +844,211 @@ mod like_tests {
         );
     }
 }
+
+/// Tests against captured InnerTube responses.
+///
+/// The parser walks the renderer tree by name, which is what makes it tolerant
+/// of shape changes — and how it fails: a renamed renderer or a moved field
+/// means extraction returns nothing and the app goes quietly empty. These are
+/// real responses, captured by `tools/capture-fixtures.py`.
+///
+/// The assertions are the contract the app depends on rather than exact
+/// content: counts are floors, titles are non-empty, ids look like ids. So
+/// re-capturing should not break them unless the shape really changed, which
+/// is the signal worth having.
+#[cfg(test)]
+mod captured {
+    use super::*;
+    use crate::ytm::domain::{ItemKind, PageKind};
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    fn fixture(name: &str) -> Value {
+        let path = format!(
+            "{}/tests/fixtures/{name}.json.gz",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let mut text = String::new();
+        GzDecoder::new(std::io::BufReader::new(file))
+            .read_to_string(&mut text)
+            .expect("fixture should be gzip");
+        serde_json::from_str(&text).expect("fixture should be JSON")
+    }
+
+    #[test]
+    fn an_unfiltered_search_yields_rows_of_several_kinds() {
+        let items = parse_search_items(&fixture("search_all"));
+        assert!(
+            items.len() >= 20,
+            "expected a page of rows, got {}",
+            items.len()
+        );
+        for item in &items {
+            assert!(!item.title.is_empty(), "row with no title: {item:?}");
+        }
+
+        // The All view is grouped client-side, so the response itself has to
+        // carry more than one kind or the sections come out empty.
+        let kinds: Vec<ItemKind> = items.iter().map(|item| item.kind).collect();
+        assert!(kinds.contains(&ItemKind::Song), "no songs in {kinds:?}");
+        assert!(kinds.len() >= 3, "expected several kinds, got {kinds:?}");
+
+        assert!(
+            items.iter().any(|item| item.video_id.is_some()),
+            "no playable row anywhere"
+        );
+        assert!(
+            items.iter().any(|item| item.duration_secs.is_some()),
+            "no durations anywhere"
+        );
+        assert!(
+            items.iter().any(|item| item.browse_id.is_some()),
+            "nothing to open anywhere"
+        );
+        assert!(
+            items.iter().any(|item| item.thumbnail.is_some()),
+            "no artwork anywhere"
+        );
+        assert!(
+            items.iter().any(|item| !item.artists.is_empty()),
+            "no artist names anywhere"
+        );
+    }
+
+    #[test]
+    fn a_filtered_search_is_a_page_of_song_rows() {
+        // A filtered search still arrives in a shelf, but the app labels that
+        // section itself and shows the rows — so what has to hold is that the
+        // rows are there and read as the kind that was asked for.
+        let value = fixture("search_songs");
+        assert!(
+            find_first(&value, "musicShelfRenderer").is_some(),
+            "a filtered search should still arrive in a shelf"
+        );
+        let items = parse_search_items(&value);
+        assert!(items.len() >= 10, "got {} rows", items.len());
+        assert!(items.iter().all(|item| !item.title.is_empty()));
+        assert!(items.iter().any(|item| item.video_id.is_some()));
+        let songs = items
+            .iter()
+            .filter(|item| item.kind == ItemKind::Song)
+            .count();
+        assert!(
+            songs >= 8,
+            "only {songs} of {} rows read as songs",
+            items.len()
+        );
+    }
+
+    #[test]
+    fn an_album_page_carries_its_tracks_and_its_description() {
+        // The id is synthetic: parse_page only reads its prefix to decide what
+        // kind of page this is, and a made-up one survives re-capturing.
+        let page = parse_page("MPREb_fixture", &fixture("browse_album"));
+        assert!(
+            matches!(page.kind, PageKind::Album),
+            "read as {:?}",
+            page.kind
+        );
+        assert!(!page.title.is_empty());
+        assert!(page.thumbnail.is_some(), "the header art");
+        assert!(!page.description.is_empty(), "the blurb under the header");
+        assert!(page.tracks.len() >= 5, "got {} tracks", page.tracks.len());
+        assert!(
+            page.track_count.is_some_and(|n| n >= page.tracks.len()),
+            "track count {:?} against {} tracks",
+            page.track_count,
+            page.tracks.len()
+        );
+        for track in &page.tracks {
+            assert!(!track.video_id.is_empty(), "track with no id: {track:?}");
+            assert!(!track.title.is_empty(), "track with no title: {track:?}");
+        }
+        assert!(page.tracks.iter().any(|t| t.duration_secs.is_some()));
+        assert!(page.tracks.iter().any(|t| !t.artists.is_empty()));
+    }
+
+    #[test]
+    fn an_artist_page_is_shelves_of_openable_items() {
+        let page = parse_page("UCfixture", &fixture("browse_artist"));
+        assert!(
+            matches!(page.kind, PageKind::Artist),
+            "read as {:?}",
+            page.kind
+        );
+        assert!(!page.title.is_empty());
+        assert!(
+            page.shelves.len() >= 2,
+            "got {} shelves",
+            page.shelves.len()
+        );
+        for shelf in &page.shelves {
+            assert!(!shelf.title.is_empty(), "a shelf with no title");
+            assert!(!shelf.items.is_empty(), "shelf {:?} is empty", shelf.title);
+            assert!(shelf.items.iter().all(|item| !item.title.is_empty()));
+        }
+        // Some of those have to be openable, or the page is a dead end.
+        assert!(
+            page.shelves
+                .iter()
+                .flat_map(|shelf| &shelf.items)
+                .any(|item| item.browse_id.is_some()),
+            "nothing on the page can be opened"
+        );
+    }
+
+    #[test]
+    fn a_playlist_page_carries_its_entries() {
+        let page = parse_page("VLPLfixture", &fixture("browse_playlist"));
+        assert!(
+            matches!(page.kind, PageKind::Playlist),
+            "read as {:?}",
+            page.kind
+        );
+        assert!(!page.title.is_empty());
+        assert!(page.tracks.len() >= 5, "got {} tracks", page.tracks.len());
+        for track in &page.tracks {
+            assert!(!track.video_id.is_empty(), "entry with no id: {track:?}");
+            assert!(!track.title.is_empty(), "entry with no title: {track:?}");
+        }
+        assert!(page.tracks.iter().any(|t| !t.artists.is_empty()));
+    }
+
+    #[test]
+    fn the_home_feed_is_shelves() {
+        let value = fixture("browse_home");
+        // Home is a feed rather than a detail page, so it has no kind of its
+        // own; what matters is that its shelves come through.
+        let page = parse_page("FEmusic_home", &value);
+        assert!(
+            matches!(page.kind, PageKind::Unknown),
+            "read as {:?}",
+            page.kind
+        );
+
+        let shelves = parse_shelves(&value);
+        assert!(shelves.len() >= 3, "got {} shelves", shelves.len());
+        for shelf in &shelves {
+            assert!(!shelf.title.is_empty(), "a shelf with no title");
+            assert!(!shelf.items.is_empty(), "shelf {:?} is empty", shelf.title);
+        }
+    }
+
+    /// Every test above would pass by finding nothing if a fixture stopped
+    /// carrying the renderers the parser walks, so check that directly.
+    #[test]
+    fn fixtures_still_carry_the_renderers_the_parser_walks() {
+        for (name, renderer) in [
+            ("search_all", "musicResponsiveListItemRenderer"),
+            ("browse_album", "musicShelfRenderer"),
+            ("browse_album", "musicTwoRowItemRenderer"),
+            ("browse_home", "musicCarouselShelfRenderer"),
+        ] {
+            assert!(
+                find_first(&fixture(name), renderer).is_some(),
+                "{name} no longer contains {renderer}"
+            );
+        }
+    }
+}
