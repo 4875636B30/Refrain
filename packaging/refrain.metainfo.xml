@@ -78,6 +78,18 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.17" date="2026-10-13">
+      <description>
+        <p>Playback dropouts are reported rather than handled in silence: the
+           buffer underruns the output device reports, and the reads that had to
+           wait for the downloader. The two mean different things — the waits
+           say the download is behind real time, the underruns alone point
+           below it — and Settings shows both.</p>
+        <p><code>--underrun-test &lt;id&gt; [seconds]</code> plays a track aloud
+           and prints the same numbers, so a stutter can be settled on a machine
+           with real audio.</p>
+      </description>
+    </release>
     <release version="0.1.16" date="2026-10-13">
       <description>
         <p>An AppImage install now fetches the AppImage. It used to fetch the
