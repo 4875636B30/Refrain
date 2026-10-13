@@ -15,7 +15,7 @@ mod update;
 mod ytm;
 
 /// Every option the dispatcher above knows about, for the typo warning.
-const KNOWN_FLAGS: [&str; 19] = [
+const KNOWN_FLAGS: [&str; 20] = [
     "--auth-check",
     "--canary",
     "--decode",
@@ -32,6 +32,7 @@ const KNOWN_FLAGS: [&str; 19] = [
     "--search",
     "--stream",
     "--thumb",
+    "--underrun-test",
     "--version",
     "-V",
     "-h",
@@ -44,6 +45,8 @@ const USAGE: &str = "Refrain — a desktop client for YouTube Music.
   refrain --fps                print the frame rate the platform delivers
   refrain --canary             check yt-dlp, the JavaScript runtime and the API
   refrain --play-test <id>     play a track muted, and assert that it plays
+  refrain --underrun-test <id> [secs]
+                               play aloud and report stalls and dropouts
   refrain --stream <id>        stream a track and report time to first audio
   refrain --play-local <path>  play a local file muted (device versus stream)
   refrain --auth-check         report where the session comes from
@@ -147,6 +150,26 @@ fn main() -> eframe::Result<()> {
         }
         if let Err(e) = play_test_cmd(&id) {
             eprintln!("play-test failed: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // `--underrun-test <video_id> [seconds]` plays aloud and reports whether
+    // playback kept up: the only way to tell a slow download from a slow
+    // machine, and the reason the app now counts both.
+    if let Some(pos) = args.iter().position(|a| a == "--underrun-test") {
+        let id = args.get(pos + 1).cloned().unwrap_or_default();
+        if id.is_empty() {
+            eprintln!("usage: --underrun-test <video_id> [seconds]");
+            std::process::exit(2);
+        }
+        let seconds = args
+            .get(pos + 2)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(20);
+        if let Err(e) = underrun_test_cmd(&id, seconds) {
+            eprintln!("underrun-test failed: {e:#}");
             std::process::exit(1);
         }
         return Ok(());
@@ -401,12 +424,14 @@ fn play_test_cmd(video_id: &str) -> anyhow::Result<()> {
     let prefetch = std::time::Instant::now();
     let source = audio::stream::RemoteSource::new(args, cache)?;
     let failure = source.failure_handle();
+    let stats = source.stats_handle();
     let decoder = rodio::Decoder::new(source)
         .map_err(|e| anyhow::anyhow!(failure.get().unwrap_or_else(|| e.to_string())))?;
+    let prepared = audio::stream::PreparedStream { decoder, stats };
     println!(
         "prefetch (open + decode) took {:?} (total {:?})",
         prefetch.elapsed(),
-        decoder.total_duration()
+        prepared.decoder.total_duration()
     );
 
     let track = ytm::Track {
@@ -418,7 +443,7 @@ fn play_test_cmd(video_id: &str) -> anyhow::Result<()> {
     // Phase 2: the user clicks — this is now nearly free.
     std::thread::sleep(std::time::Duration::from_secs(2));
     let clicked = std::time::Instant::now();
-    engine.play_decoder(decoder, track)?;
+    engine.play_decoder(prepared, track)?;
     println!("click -> playing in {:?}", clicked.elapsed());
 
     std::thread::sleep(std::time::Duration::from_secs(3));
@@ -465,6 +490,95 @@ fn stream_cmd(video_id: &str) -> anyhow::Result<()> {
         first.elapsed(),
         samples
     );
+    Ok(())
+}
+
+/// Play a track aloud and report whether playback kept up.
+///
+/// An underrun has two symptoms and they mean different things. The output
+/// device reports one when its buffer drains; the decoder having to wait for
+/// the downloader says *why* — the download was behind real time. Counting both
+/// while the track plays normally is the only way to tell a slow download from
+/// a slow machine.
+fn underrun_test_cmd(video_id: &str, seconds: u64) -> anyhow::Result<()> {
+    let cfg = config::Config::load();
+    let rt = tokio::runtime::Runtime::new()?;
+    let auth = rt
+        .block_on(auth::resolve(&cfg))?
+        .map(|resolved| resolved.source)
+        .unwrap_or_default();
+
+    let mut engine = audio::AudioEngine::new()?;
+    engine.set_volume(0.8);
+
+    let args = audio::resolver::stream_args(video_id, &auth);
+    let cache = Some(audio::resolver::cache_path(video_id));
+    let source = audio::stream::RemoteSource::new(args, cache)?;
+    let failure = source.failure_handle();
+    let stats = source.stats_handle();
+    let decoder = rodio::Decoder::new(source)
+        .map_err(|e| anyhow::anyhow!(failure.get().unwrap_or_else(|| e.to_string())))?;
+    let prepared = audio::stream::PreparedStream { decoder, stats };
+
+    engine.play_decoder(
+        prepared,
+        ytm::Track {
+            video_id: video_id.to_string(),
+            title: "underrun-test".to_string(),
+            ..Default::default()
+        },
+    )?;
+    println!("playing {video_id} aloud for {seconds}s — listen for stutters");
+
+    // The position is driven by decoded samples, so a second of wall clock that
+    // advances it by much less is a second the audio callback spent starved.
+    let mut stalls = 0u64;
+    let mut last = engine.position();
+    for _ in 0..seconds {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let now = engine.position();
+        let advanced = now.saturating_sub(last);
+        let behind = std::time::Duration::from_secs(1).saturating_sub(advanced);
+        if behind >= std::time::Duration::from_millis(50) {
+            stalls += 1;
+            println!(
+                "  {:>3}s  advanced {:?}, {:?} behind",
+                last.as_secs(),
+                advanced,
+                behind
+            );
+        }
+        last = now;
+    }
+
+    let starvation = engine.stream_starvation().unwrap_or_default();
+    let xruns = engine.xruns();
+    println!();
+    println!(
+        "position advanced to : {:?} of {:?}",
+        engine.position(),
+        engine.total
+    );
+    println!("stalled seconds      : {stalls}");
+    println!("device underruns     : {xruns}");
+    println!(
+        "stream waits         : {} (total {:?}, longest {:?})",
+        starvation.waits, starvation.waited, starvation.longest
+    );
+    if xruns == 0 && stalls == 0 && !starvation.is_audible() {
+        println!("\nno dropouts: playback kept up");
+    } else if starvation.is_audible() {
+        println!(
+            "\ndropouts found — the download is behind real time, so a larger \
+             read-ahead would help"
+        );
+    } else {
+        println!(
+            "\ndropouts found — the stream kept up, so the fault is below it \
+             (device, mixer, or machine)"
+        );
+    }
+    engine.stop();
     Ok(())
 }
 

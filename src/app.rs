@@ -39,12 +39,12 @@ enum Msg {
     /// A stream has been opened and decoded (off the UI thread).
     Decoded {
         track: Track,
-        result: Result<rodio::Decoder<crate::audio::stream::RemoteSource>, String>,
+        result: Result<crate::audio::stream::PreparedStream, String>,
     },
     /// A stream opened ahead of time, ready to play instantly.
     Prefetched {
         track: Track,
-        result: Result<rodio::Decoder<crate::audio::stream::RemoteSource>, String>,
+        result: Result<crate::audio::stream::PreparedStream, String>,
     },
     /// Further shelves loaded via a continuation token.
     MoreShelves {
@@ -200,7 +200,7 @@ enum Nav {
 /// A stream opened before the user pressed play, so starting is instant.
 struct PrefetchedStream {
     video_id: String,
-    decoder: rodio::Decoder<crate::audio::stream::RemoteSource>,
+    stream: crate::audio::stream::PreparedStream,
 }
 
 /// Where per-track play counts live.
@@ -1052,15 +1052,11 @@ impl App {
     /// Queue stream-URL resolution for tracks the user is likely to click, so
     /// playback can start without waiting on yt-dlp.
     /// Start playing an already-opened decoder.
-    fn play_decoder(
-        &mut self,
-        decoder: rodio::Decoder<crate::audio::stream::RemoteSource>,
-        track: Track,
-    ) {
+    fn play_decoder(&mut self, stream: crate::audio::stream::PreparedStream, track: Track) {
         self.pending_play = None;
         let video_id = track.video_id.clone();
         let started = match self.audio.as_mut() {
-            Some(audio) => match audio.play_decoder(decoder, track) {
+            Some(audio) => match audio.play_decoder(stream, track) {
                 Ok(()) => {
                     self.status = None;
                     self.advance_armed = true;
@@ -1151,7 +1147,9 @@ impl App {
                         // failed reader as an unrecognised format, which hides
                         // the actual reason.
                         let failure = source.failure_handle();
+                        let stats = source.stats_handle();
                         rodio::Decoder::new(source)
+                            .map(|decoder| crate::audio::stream::PreparedStream { decoder, stats })
                             .map_err(|e| failure.get().unwrap_or_else(|| e.to_string()))
                     }
                     Err(e) => Err(e.to_string()),
@@ -1192,7 +1190,12 @@ impl App {
             .name("ytm-decode".into())
             .spawn(move || {
                 let result = match crate::audio::stream::RemoteSource::new(args, cache) {
-                    Ok(source) => rodio::Decoder::new(source).map_err(|e| e.to_string()),
+                    Ok(source) => {
+                        let stats = source.stats_handle();
+                        rodio::Decoder::new(source)
+                            .map(|decoder| crate::audio::stream::PreparedStream { decoder, stats })
+                            .map_err(|e| e.to_string())
+                    }
                     Err(e) => Err(e.to_string()),
                 };
                 let _ = tx.send(Msg::Decoded { track, result });
@@ -1373,7 +1376,7 @@ impl App {
         {
             // Opened while hovering / when the page loaded: play immediately.
             let prepared = self.prefetched.remove(index);
-            self.play_decoder(prepared.decoder, track);
+            self.play_decoder(prepared.stream, track);
         } else if self.prefetch_inflight.contains(&track.video_id) {
             // Already opening for this very track — just wait for it.
             self.status = Some(format!("Starting stream for “{}”…", track.title));
@@ -1947,7 +1950,7 @@ impl App {
                         .unwrap_or(false);
                     if is_pending {
                         match result {
-                            Ok(decoder) => self.play_decoder(decoder, track),
+                            Ok(stream) => self.play_decoder(stream, track),
                             Err(e) => {
                                 // No streamable m4a, or yt-dlp/YouTube refused:
                                 // fall back to the download+transcode path.
@@ -1965,14 +1968,14 @@ impl App {
                         .as_ref()
                         .is_some_and(|t| t.video_id == track.video_id);
                     match result {
-                        Ok(decoder) if is_pending => {
+                        Ok(stream) if is_pending => {
                             // The user clicked while it was still opening.
-                            self.play_decoder(decoder, track);
+                            self.play_decoder(stream, track);
                         }
-                        Ok(decoder) => {
+                        Ok(stream) => {
                             self.prefetched.push(PrefetchedStream {
                                 video_id: track.video_id,
-                                decoder,
+                                stream,
                             });
                             // Hold only the two most recent; dropping one stops
                             // its yt-dlp process.
@@ -3445,6 +3448,48 @@ impl App {
                         .clicked()
                     {
                         clear_cache = true;
+                    }
+                });
+
+                // Dropouts are otherwise invisible: an underrun is handled and
+                // forgotten, and a stream that had to wait looks like a healthy
+                // one. Two numbers, because they mean different things — the
+                // waits say the download is behind, the underruns alone point
+                // below it.
+                ui::card(ui, |ui| {
+                    ui.label(ui::title("Playback").size(15.0));
+                    let xruns = self.audio.as_ref().map(|a| a.xruns()).unwrap_or(0);
+                    let starvation = self
+                        .audio
+                        .as_ref()
+                        .and_then(|a| a.stream_starvation())
+                        .unwrap_or_default();
+                    ui.label(
+                        RichText::new(format!("buffer underruns · {xruns}"))
+                            .weak()
+                            .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "stream waits · {} (longest {} ms)",
+                            starvation.waits,
+                            starvation.longest.as_millis()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    if xruns > 0 || starvation.is_audible() {
+                        ui.label(
+                            RichText::new(if starvation.is_audible() {
+                                "Dropping out — the download is behind real time."
+                            } else {
+                                "Dropping out — the stream kept up, so the fault is below it."
+                            })
+                            .color(ui::WARN)
+                            .small(),
+                        );
+                    } else {
+                        ui.label(RichText::new("Nothing has dropped out.").weak().small());
                     }
                 });
 
