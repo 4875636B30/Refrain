@@ -77,6 +77,31 @@ pub(crate) fn js_runtime_args() -> Vec<String> {
     Vec::new()
 }
 
+/// Which JavaScript runtime yt-dlp will be handed, for the settings display.
+///
+/// Derived from the same lookup that builds the arguments, so what the window
+/// says is what playback actually uses — including whether the runtime is the
+/// one shipped beside the executable.
+pub(crate) fn js_runtime_report() -> String {
+    let args = js_runtime_args();
+    let Some(value) = args.get(1) else {
+        return "none found".to_string();
+    };
+    let Some((name, path)) = value.split_once(':') else {
+        // Named without a path, so yt-dlp will look it up on PATH itself.
+        return format!("{value} (on PATH)");
+    };
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .is_some_and(|dir| Path::new(path).starts_with(dir));
+    if beside {
+        format!("{name} (bundled)")
+    } else {
+        format!("{name} ({path})")
+    }
+}
+
 /// Authentication is needed because YouTube bot-blocks anonymous access to much
 /// of the music catalogue. The cookie source comes from the config.
 fn cookie_args(auth: &crate::config::AuthConfig) -> Vec<String> {
@@ -229,7 +254,7 @@ pub fn cache_path(video_id: &str) -> PathBuf {
 /// Budget for cached audio. Tracks run a few MB each, so this is a few hundred
 /// of them: everything played recently stays, but the directory cannot grow
 /// without bound.
-const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Files touched more recently than this are never evicted — they may be the
 /// track that is playing, one being warmed, or a fetch still in flight.

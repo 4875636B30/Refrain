@@ -2276,37 +2276,36 @@ impl App {
                     egui::vec2(centre_width, ui::CONTROL_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        const SEARCH_WIDTH: f32 = 340.0;
-                        // The chip fits its label — so the chevron sits against
-                        // it — but the slot it sits in is fixed, or the centred
-                        // cluster would shift sideways when the filter changes.
-                        const FILTER_SLOT: f32 = 112.0;
-                        let cluster = SEARCH_WIDTH + 12.0 + FILTER_SLOT + 12.0 + 88.0;
+                        // The category chip lives inside the field, so the
+                        // cluster is the field and the button — there is nothing
+                        // sitting beside anything else to collide with, at any
+                        // window width. The field takes what is going, up to a
+                        // point where a wider one would stop helping.
+                        const SEARCH_MAX: f32 = 460.0;
+                        const BUTTON: f32 = 88.0;
+                        const GAP: f32 = 12.0;
+                        let search_width = (centre_width - GAP - BUTTON).clamp(200.0, SEARCH_MAX);
+                        let cluster = search_width + GAP + BUTTON;
                         ui.add_space(((centre_width - cluster) / 2.0).max(0.0));
-                        if ui::search_bar(ui, &mut self.query, SEARCH_WIDTH) {
-                            do_search = true;
-                        }
-                        ui.add_space(12.0);
-                        let mut chosen = None;
-                        ui::fixed_section(
-                            ui,
-                            egui::vec2(FILTER_SLOT, ui::CONTROL_HEIGHT),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                chosen = ui::pill_dropdown(
+                        let chip_width = ui::pill_width(ui, self.filter.label());
+                        let (submitted, chosen) =
+                            ui::search_field(ui, &mut self.query, search_width, chip_width, |ui| {
+                                ui::pill_dropdown(
                                     ui,
                                     "search_filter",
                                     self.filter,
                                     &SearchFilter::ALL_FILTERS,
                                     |filter| filter.label(),
-                                );
-                            },
-                        );
+                                )
+                            });
+                        if submitted {
+                            do_search = true;
+                        }
                         if let Some(chosen) = chosen {
                             self.filter = chosen;
                             filter_changed = true;
                         }
-                        ui.add_space(12.0);
+                        ui.add_space(GAP);
                         if ui::pill_button(ui, "Search").clicked() {
                             do_search = true;
                         }
@@ -2317,11 +2316,11 @@ impl App {
                     egui::vec2(side, ui::CONTROL_HEIGHT),
                     Layout::right_to_left(Align::Center),
                     |ui| {
-                        // The spinner sits left of the gear, which is rightmost.
-                        if self.busy {
-                            ui.spinner();
-                            ui.add_space(8.0);
-                        }
+                        // The gear is rightmost and stays there. In a
+                        // right-to-left layout the first widget added is the
+                        // rightmost, so it goes first, and the spinner gets a
+                        // slot of its own beside it — appearing there cannot
+                        // push anything sideways.
                         let gear = ui::icon_button(
                             ui,
                             ui::Icon::Glyph("⚙"),
@@ -2329,6 +2328,14 @@ impl App {
                             true,
                             "Settings and theme",
                         );
+                        ui.add_space(6.0);
+                        let (busy_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(18.0, ui::CONTROL_HEIGHT),
+                            egui::Sense::hover(),
+                        );
+                        if self.busy {
+                            ui.put(busy_rect, egui::Spinner::new().size(15.0));
+                        }
                         let theme_label = if self.theme_light {
                             "☾  Dark theme"
                         } else {
@@ -2870,203 +2877,244 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.set_min_width(400.0);
+                // Wide enough for a path to sit on one line, and grouped into
+                // cards so the window reads as sections rather than a list.
+                ui.set_min_width(460.0);
+                ui.spacing_mut().item_spacing.y = 6.0;
 
-                ui.label(ui::title("Appearance").size(16.0));
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(!self.theme_light, "Dark").clicked() {
-                        self.theme_light = false;
-                        theme_changed = true;
-                    }
-                    if ui.selectable_label(self.theme_light, "Light").clicked() {
-                        self.theme_light = true;
-                        theme_changed = true;
-                    }
+                ui::card(ui, |ui| {
+                    ui.label(ui::title("Appearance").size(15.0));
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui::segment(ui, "Dark", !self.theme_light).clicked() {
+                            self.theme_light = false;
+                            theme_changed = true;
+                        }
+                        if ui::segment(ui, "Light", self.theme_light).clicked() {
+                            self.theme_light = true;
+                            theme_changed = true;
+                        }
+                    });
                 });
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
+                ui::card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(ui::title("Sign-in").size(15.0));
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(if self.authenticated {
+                                "signed in"
+                            } else {
+                                "anonymous"
+                            })
+                            .color(if self.authenticated { ui::OK } else { ui::WARN })
+                            .small(),
+                        );
+                    });
+                    ui.label(
+                        RichText::new(if self.authenticated {
+                            "Your library, ratings and playlists are available."
+                        } else {
+                            "Search and browsing work; your library needs a signed-in browser."
+                        })
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(6.0);
 
-                ui.label(ui::title("Sign-in").size(16.0));
-                ui.label(
-                    RichText::new(if self.authenticated {
-                        "Signed in — your library, ratings and playlists are available."
+                    let in_use = if self.auth.browser.trim().is_empty() {
+                        self.auth.mode.label()
                     } else {
-                        "Anonymous — search and browsing work; your library needs a signed-in browser."
-                    })
-                    .weak()
-                    .small(),
-                );
-                let in_use = if self.auth.browser.trim().is_empty() {
-                    self.auth.mode.label()
-                } else {
-                    self.auth.browser.as_str()
-                };
-                ui.label(RichText::new(format!("In use: {in_use}")).weak().small());
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Read cookies").weak().small());
-                    if let Some(mode) = ui::pill_dropdown(
-                        ui,
-                        "auth_mode",
-                        self.auth_pref.mode,
-                        &AuthMode::ALL,
-                        |mode| mode.label(),
-                    ) {
-                        self.auth_pref.mode = mode;
-                        auth_changed = true;
+                        self.auth.browser.as_str()
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Read cookies").weak().small());
+                        ui.add_space(4.0);
+                        if let Some(mode) = ui::pill_dropdown(
+                            ui,
+                            "auth_mode",
+                            self.auth_pref.mode,
+                            &AuthMode::ALL,
+                            |mode| mode.label(),
+                        ) {
+                            self.auth_pref.mode = mode;
+                            auth_changed = true;
+                        }
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(format!("in use: {in_use}")).weak().small());
+                    });
+
+                    if self.auth_pref.mode == AuthMode::Browser {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Browser").weak().small());
+                            ui.add_space(4.0);
+                            let current = KNOWN_BROWSERS
+                                .iter()
+                                .copied()
+                                .find(|browser| *browser == self.auth_pref.browser)
+                                .unwrap_or(KNOWN_BROWSERS[0]);
+                            if let Some(browser) = ui::pill_dropdown(
+                                ui,
+                                "auth_browser",
+                                current,
+                                &KNOWN_BROWSERS,
+                                |browser| browser,
+                            ) {
+                                self.auth_pref.browser = browser.to_string();
+                                auth_changed = true;
+                            }
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Keyring").weak().small());
+                            ui.add_space(4.0);
+                            let current = KNOWN_KEYRINGS
+                                .iter()
+                                .copied()
+                                .find(|keyring| *keyring == self.auth_pref.keyring)
+                                .unwrap_or("");
+                            if let Some(keyring) = ui::pill_dropdown(
+                                ui,
+                                "auth_keyring",
+                                current,
+                                &KNOWN_KEYRINGS,
+                                keyring_label,
+                            ) {
+                                self.auth_pref.keyring = keyring.to_string();
+                                auth_changed = true;
+                            }
+                        });
+                    }
+
+                    if self.auth_pref.mode == AuthMode::File {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Cookies file").weak().small());
+                            ui.add_space(4.0);
+                            let field = ui.add(
+                                egui::TextEdit::singleline(&mut self.auth_pref.cookies_file)
+                                    .hint_text("path to a cookies.txt")
+                                    .desired_width(300.0),
+                            );
+                            // Saved when editing stops rather than on each
+                            // keystroke: every save re-reads the session.
+                            if field.lost_focus() {
+                                auth_changed = true;
+                            }
+                        });
+                        // Worth saying before they wonder why nothing works.
+                        let path = self.auth_pref.cookies_file.trim();
+                        if !path.is_empty() && !std::path::Path::new(path).is_file() {
+                            ui.label(RichText::new("No file there.").color(ui::WARN).small());
+                        }
+                    }
+
+                    ui.add_space(6.0);
+                    if ui::quiet_button(ui, "Refresh sign-in")
+                        .on_hover_text("Discard the cached cookies and extract them again")
+                        .clicked()
+                    {
+                        refresh_auth = true;
                     }
                 });
-                if self.auth_pref.mode == AuthMode::Browser {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Browser").weak().small());
-                        let current = KNOWN_BROWSERS
-                            .iter()
-                            .copied()
-                            .find(|browser| *browser == self.auth_pref.browser)
-                            .unwrap_or(KNOWN_BROWSERS[0]);
-                        if let Some(browser) = ui::pill_dropdown(
-                            ui,
-                            "auth_browser",
-                            current,
-                            &KNOWN_BROWSERS,
-                            |browser| browser,
-                        ) {
-                            self.auth_pref.browser = browser.to_string();
-                            auth_changed = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Keyring").weak().small());
-                        let current = KNOWN_KEYRINGS
-                            .iter()
-                            .copied()
-                            .find(|keyring| *keyring == self.auth_pref.keyring)
-                            .unwrap_or("");
-                        if let Some(keyring) = ui::pill_dropdown(
-                            ui,
-                            "auth_keyring",
-                            current,
-                            &KNOWN_KEYRINGS,
-                            keyring_label,
-                        ) {
-                            self.auth_pref.keyring = keyring.to_string();
-                            auth_changed = true;
-                        }
-                    });
-                }
-                if self.auth_pref.mode == AuthMode::File {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Cookies file").weak().small());
-                        let field = ui.add(
-                            egui::TextEdit::singleline(&mut self.auth_pref.cookies_file)
-                                .hint_text("path to a cookies.txt")
-                                .desired_width(240.0),
-                        );
-                        // Saved when editing stops rather than on each keystroke:
-                        // every save re-reads the session.
-                        if field.lost_focus() {
-                            auth_changed = true;
-                        }
-                    });
-                    // Worth saying before they wonder why nothing works.
-                    let path = self.auth_pref.cookies_file.trim();
-                    if !path.is_empty() && !std::path::Path::new(path).is_file() {
-                        ui.label(
-                            RichText::new("No file there.")
-                                .color(ui::WARN)
-                                .small(),
-                        );
+
+                ui::card(ui, |ui| {
+                    ui.label(ui::title("Storage").size(15.0));
+                    let (tracks, bytes) = self.cache_usage;
+                    ui.label(
+                        RichText::new(format!(
+                            "{tracks} cached tracks · {} of {}",
+                            ui::fmt_bytes(bytes),
+                            ui::fmt_bytes(resolver::CACHE_BUDGET_BYTES)
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(4.0);
+                    ui::meter(ui, bytes as f32 / resolver::CACHE_BUDGET_BYTES as f32);
+                    ui.add_space(6.0);
+                    if ui::quiet_button(ui, "Clear cached audio")
+                        .on_hover_text("Playback re-resolves anything you play again")
+                        .clicked()
+                    {
+                        clear_cache = true;
                     }
-                }
-                ui.add_space(4.0);
-                if ui
-                    .button("Refresh sign-in")
-                    .on_hover_text("Discard the cached cookies and extract them again")
-                    .clicked()
-                {
-                    refresh_auth = true;
-                }
+                });
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-
-                ui.label(ui::title("Storage").size(16.0));
-                let (tracks, bytes) = self.cache_usage;
-                ui.label(
-                    RichText::new(format!(
-                        "{tracks} cached tracks, {:.0} MB on disk",
-                        bytes as f64 / 1e6
-                    ))
-                    .weak()
-                    .small(),
-                );
-                if ui
-                    .button("Clear cached audio")
-                    .on_hover_text("Playback re-resolves anything you play again")
-                    .clicked()
-                {
-                    clear_cache = true;
-                }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-
-                ui.label(ui::title("Playback").size(16.0));
-                match &self.ytdlp {
-                    Some(path) => {
-                        ui.label(
-                            RichText::new(format!("yt-dlp: {}", path.display()))
-                                .weak()
-                                .small(),
-                        );
-                        let age = resolver::ytdlp_age(path).map(|age| age.as_secs() / 86_400);
-                        match (&self.ytdlp_version, age) {
-                            (Some(version), Some(days)) => {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "version {version}, written {days} days ago"
-                                    ))
-                                    .weak()
-                                    .small(),
-                                );
-                                if days > STALE_YTDLP_DAYS {
+                ui::card(ui, |ui| {
+                    ui.label(ui::title("Playback").size(15.0));
+                    ui.add_space(2.0);
+                    match &self.ytdlp {
+                        Some(path) => {
+                            ui::status_row(
+                                ui,
+                                true,
+                                "yt-dlp",
+                                &ui::short_path(path, 44),
+                                &path.display().to_string(),
+                            );
+                            let age = resolver::ytdlp_age(path).map(|age| age.as_secs() / 86_400);
+                            match (&self.ytdlp_version, age) {
+                                (Some(version), Some(days)) => {
                                     ui.label(
-                                        RichText::new(
-                                            "That copy is getting old. yt-dlp has to be updated when \
-                                             YouTube changes, so update it — or download this app again.",
-                                        )
-                                        .color(ui::WARN)
+                                        RichText::new(format!(
+                                            "version {version} · written {days} days ago"
+                                        ))
+                                        .weak()
                                         .small(),
+                                    );
+                                    if days > STALE_YTDLP_DAYS {
+                                        ui.label(
+                                            RichText::new(
+                                                "That copy is getting old — yt-dlp has to be updated \
+                                                 when YouTube changes. Update it, or download this \
+                                                 app again.",
+                                            )
+                                            .color(ui::WARN)
+                                            .small(),
+                                        );
+                                    }
+                                }
+                                (Some(version), None) => {
+                                    ui.label(
+                                        RichText::new(format!("version {version}")).weak().small(),
+                                    );
+                                }
+                                _ => {
+                                    ui.label(
+                                        RichText::new("Checking the version…").weak().small(),
                                     );
                                 }
                             }
-                            (Some(version), None) => {
-                                ui.label(RichText::new(format!("version {version}")).weak().small());
-                            }
-                            _ => {
-                                ui.label(RichText::new("Checking the version…").weak().small());
-                            }
+                        }
+                        None => {
+                            ui::status_row(ui, false, "yt-dlp", "not found", "");
+                            ui.label(
+                                RichText::new("Playback is disabled. Install it, or set YTDLP_PATH.")
+                                    .color(ui::WARN)
+                                    .small(),
+                            );
                         }
                     }
-                    None => {
+
+                    let runtime = resolver::js_runtime_report();
+                    let runtime_ok = runtime != "none found";
+                    ui::status_row(
+                        ui,
+                        runtime_ok,
+                        "JavaScript runtime",
+                        &runtime,
+                        "yt-dlp needs one to solve YouTube's challenges. Every release carries \
+                         QuickJS beside the executable.",
+                    );
+                    if !runtime_ok {
                         ui.label(
                             RichText::new(
-                                "yt-dlp not found — playback is disabled. Install it, or set YTDLP_PATH.",
+                                "Playback will fail. Install node, deno or quickjs, or download \
+                                 this app again.",
                             )
                             .color(ui::WARN)
                             .small(),
                         );
                     }
-                }
-                ui.label(
-                    RichText::new("Streaming also needs a JavaScript runtime (node or deno).")
-                        .weak()
-                        .small(),
-                );
+                });
             });
 
         if theme_changed {

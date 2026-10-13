@@ -19,6 +19,9 @@ pub const ACCENT: Color32 = Color32::from_rgb(0xff, 0x00, 0x00);
 /// Used for warnings (missing tools, failed actions).
 pub const WARN: Color32 = Color32::from_rgb(0xe6, 0xb4, 0x64);
 
+/// The "this is working" colour for status dots.
+pub const OK: Color32 = Color32::from_rgb(0x3f, 0xc1, 0x6a);
+
 /// Apply the app's dark or light styling.
 pub fn apply_theme(ctx: &egui::Context, light: bool) {
     let theme = if light {
@@ -882,8 +885,40 @@ fn cover_tile(
 /// Stable id for the search field, so keyboard shortcuts can focus it.
 pub const SEARCH_ID: &str = "refrain_search_field";
 
-/// A rounded search pill. Returns `true` when the user submits (Enter).
-pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
+/// How wide a `pill_dropdown` carrying this label will be.
+///
+/// The search field has to reserve room for the category chip before the chip
+/// exists, and reserving the wrong amount either clips the text or leaves a gap
+/// where the hairline should be.
+pub fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
+    let visuals = ui.visuals();
+    ui.painter()
+        .layout_no_wrap(
+            label.to_string(),
+            egui::FontId::proportional(14.0),
+            visuals.text_color(),
+        )
+        .size()
+        .x
+        + 40.0
+}
+
+/// The search field, with room at its right end for a caller-drawn control —
+/// the category chip, in practice. Returns whether Enter was pressed, and
+/// whatever the trailing closure returned.
+///
+/// The chip sits *inside* the field rather than beside it. Two rounded shapes
+/// next to each other read as one shape, and at some window widths they looked
+/// like they had collided; inside, there is nothing to collide with. The width
+/// is reserved whether or not the caller draws anything, so the text does not
+/// move as the filter changes.
+pub fn search_field<R>(
+    ui: &mut egui::Ui,
+    query: &mut String,
+    width: f32,
+    trailing_width: f32,
+    trailing: impl FnOnce(&mut egui::Ui) -> R,
+) -> (bool, R) {
     let focused = ui.memory(|memory| memory.has_focus(egui::Id::new(SEARCH_ID)));
     let visuals = ui.visuals().clone();
     let radius = egui::CornerRadius::same((CONTROL_HEIGHT / 2.0) as u8);
@@ -906,12 +941,22 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
         );
     }
 
+    let inner = rect.shrink2(egui::vec2(13.0, 0.0));
+    let (divider_x, text_right) = if trailing_width > 0.0 {
+        let chip_left = (inner.right() - trailing_width).max(inner.left() + 60.0);
+        (chip_left - 7.0, chip_left - 13.0)
+    } else {
+        (inner.right(), inner.right())
+    };
+
     let mut submitted = false;
     let mut clear = false;
-    let inner = rect.shrink2(egui::vec2(13.0, 0.0));
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(inner)
+            .max_rect(egui::Rect::from_min_max(
+                inner.min,
+                egui::pos2(text_right, inner.max.y),
+            ))
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             draw_icon(
@@ -927,7 +972,7 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
 
             // Room is reserved for the clear button whether or not it is drawn,
             // so the text does not shift as you type.
-            let text_width = (inner.width() - 25.0 - 24.0).max(40.0);
+            let text_width = (text_right - inner.left() - 25.0 - 24.0).max(40.0);
             let edit = ui.add(
                 egui::TextEdit::singleline(query)
                     .frame(egui::Frame::NONE)
@@ -945,11 +990,179 @@ pub fn search_bar(ui: &mut egui::Ui, query: &mut String, width: f32) -> bool {
         },
     );
 
+    if trailing_width > 0.0 {
+        ui.painter().vline(
+            divider_x,
+            egui::Rangef::new(rect.top() + 8.0, rect.bottom() - 8.0),
+            egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        );
+    }
+    let mut chip_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(
+                egui::pos2(divider_x + 7.0, rect.top() + 2.0),
+                egui::pos2(inner.right(), rect.bottom() - 2.0),
+            ))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let trailing_result = trailing(&mut chip_ui);
+
+    // Put the cursor back at the field's right edge. The text is drawn inside a
+    // scope, and a scope ends by advancing the cursor to the end of *its* rect —
+    // which is short of the field, because the chip occupies the rest. Without
+    // this, whatever comes next is laid out inside the field instead of after
+    // it, which is what made the filter pill overlap the search box.
+    ui.advance_cursor_after_rect(rect);
+
     if clear {
         query.clear();
         ui.memory_mut(|memory| memory.request_focus(egui::Id::new(SEARCH_ID)));
     }
-    submitted
+    (submitted, trailing_result)
+}
+
+/// A rounded panel grouping related settings.
+pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let visuals = ui.visuals().clone();
+    egui::Frame::NONE
+        .fill(chip_fill(&visuals))
+        .corner_radius(egui::CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// One option of a segmented control: accent-filled when chosen.
+pub fn segment(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let visuals = ui.visuals().clone();
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::proportional(14.0),
+        visuals.text_color(),
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + 36.0, CONTROL_HEIGHT),
+        egui::Sense::click(),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if selected {
+        ACCENT
+    } else if response.hovered() {
+        visuals.widgets.hovered.bg_fill
+    } else {
+        chip_fill(&visuals)
+    };
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same((CONTROL_HEIGHT / 2.0) as u8),
+        fill,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        if selected {
+            Color32::WHITE
+        } else {
+            visuals.text_color()
+        },
+    );
+    response
+}
+
+/// A pill-shaped button for secondary actions: chip-filled rather than accent.
+pub fn quiet_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let radius = (CONTROL_HEIGHT / 2.0) as u8;
+    with_visuals(
+        ui,
+        |visuals| {
+            pill(
+                visuals,
+                chip_fill(visuals),
+                visuals.widgets.hovered.bg_fill,
+                visuals.text_color(),
+                radius,
+            )
+        },
+        |ui| ui.button(label),
+    )
+}
+
+/// A status row: a coloured dot, a label, and a value in weak text.
+pub fn status_row(ui: &mut egui::Ui, ok: bool, label: &str, value: &str, tooltip: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(12.0, CONTROL_HEIGHT), egui::Sense::hover());
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + 5.0, rect.center().y),
+            4.0,
+            if ok { OK } else { WARN },
+        );
+        ui.add_space(2.0);
+        ui.label(RichText::new(label).small());
+        ui.add_space(4.0);
+        let value = ui.label(RichText::new(value).weak().small());
+        if !tooltip.is_empty() {
+            value.on_hover_text(tooltip);
+        }
+    });
+}
+
+/// A static usage bar, for "how full is this" displays.
+pub fn meter(ui: &mut egui::Ui, fraction: f32) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 6.0), egui::Sense::hover());
+    let visuals = ui.visuals();
+    let radius = 3.0;
+    ui.painter()
+        .rect_filled(rect, radius, visuals.widgets.inactive.bg_fill);
+    let filled = width * fraction.clamp(0.0, 1.0);
+    if filled > 0.5 {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(filled, rect.height())),
+            radius,
+            ACCENT,
+        );
+    }
+}
+
+/// A path shortened for display. The full path belongs in a tooltip.
+pub fn short_path(path: &std::path::Path, max_chars: usize) -> String {
+    let text = path.to_string_lossy();
+    let home = std::env::var_os("HOME").map(|home| home.to_string_lossy().into_owned());
+    let shortened = match home {
+        Some(home) if !home.is_empty() && text.starts_with(&home) => {
+            format!("~{}", &text[home.len()..])
+        }
+        _ => text.into_owned(),
+    };
+    if shortened.chars().count() <= max_chars {
+        return shortened;
+    }
+    // Keep the end: the file name is the informative part.
+    let keep = max_chars.saturating_sub(1);
+    let tail: String = shortened
+        .chars()
+        .skip(shortened.chars().count() - keep)
+        .collect();
+    format!("…{tail}")
+}
+
+/// Bytes as MB or GB, for cache sizes.
+pub fn fmt_bytes(bytes: u64) -> String {
+    let mb = bytes as f64 / 1e6;
+    if mb >= 1000.0 {
+        format!("{:.1} GB", mb / 1000.0)
+    } else {
+        format!("{mb:.0} MB")
+    }
 }
 
 /// A single horizontally-scrolling row of cover tiles.
