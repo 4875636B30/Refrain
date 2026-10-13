@@ -267,6 +267,11 @@ pub struct UiConfig {
     pub volume: f32,
     /// "dark" or "light".
     pub theme: String,
+    /// When the last update check happened, as a Unix timestamp. The check is a
+    /// request to somebody else's server, so it happens once a day rather than
+    /// every launch.
+    #[serde(default)]
+    pub last_update_check: Option<u64>,
 }
 
 impl Default for UiConfig {
@@ -274,6 +279,7 @@ impl Default for UiConfig {
         Self {
             volume: 0.8,
             theme: "dark".to_string(),
+            last_update_check: None,
         }
     }
 }

@@ -11,6 +11,7 @@ mod config;
 mod media;
 mod thumbs;
 mod ui;
+mod update;
 mod ytm;
 
 fn main() -> eframe::Result<()> {

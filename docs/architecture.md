@@ -357,6 +357,27 @@ same reason. It is also why the runtime is worth *naming* in diagnostics:
 `--canary` reports which one was found, and fails when there is none, which is
 what keeps a release from shipping without one.
 
+## Updating itself
+
+Settings checks GitHub for a newer release — once a day automatically, and
+whenever the button is pressed — and offers to install it. Two decisions shape
+that:
+
+- **A checksum is required.** Every asset is published with a `.sha256` beside
+  it, and a download that does not match is refused rather than installed. An
+  updater that installs an unverified binary is a worse idea than no updater,
+  so a release without a checksum is downloaded and left for the user instead.
+- **Only where the app owns the files.** An AppImage is its own installation, so
+  it is replaced in place; a tarball unpacked by hand is the same, and the tools
+  beside the executable are replaced with it. A copy under `/usr`, `/app` or
+  `/nix` belongs to a package manager and is left alone — two owners of one file
+  is how installations rot — and a development build is never replaced at all.
+
+Replacing means writing a temporary file in the same directory and renaming it
+over the target, so an interrupted write leaves the old file in place rather
+than half a new one. The running process keeps the old inode, which is why the
+card says to restart; the Restart button starts the new build and steps aside.
+
 ## Packaging
 
 The binary looks for `yt-dlp` in this order, which makes a self-contained

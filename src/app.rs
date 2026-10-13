@@ -23,6 +23,7 @@ use crate::config::{KNOWN_BROWSERS, KNOWN_KEYRINGS, keyring_label};
 use crate::media;
 use crate::thumbs;
 use crate::ui;
+use crate::update;
 use crate::ytm::domain::LikeStatus;
 use crate::ytm::{Client, ItemKind, Page, SearchFilter, SearchItem, Track};
 
@@ -65,6 +66,10 @@ enum Msg {
     PlaylistEdited(Result<String, String>),
     /// The version the chosen yt-dlp reports, for the settings window.
     YtdlpVersion(Option<String>),
+    /// The answer to "is there a newer release", or why we could not ask.
+    UpdateChecked(Result<Option<update::Release>, String>),
+    /// The result of installing one, with the version it was.
+    UpdateInstalled(Result<(String, update::Outcome), String>),
     /// Further search results, appended to the current ones.
     MoreResults(Result<(Vec<SearchItem>, Option<String>), String>),
     /// A playlist was deleted. Its page has to go away if it is open.
@@ -399,6 +404,32 @@ enum Advance {
 /// Kept apart from the UI loop so the rules are actually testable: repeat-one
 /// always wins, shuffle supplies its own index, and repeat-all wraps at the
 /// end of the queue. Getting this wrong is invisible until a queue ends.
+/// Seconds since the epoch, for the update-check throttle.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// What is known about a newer release.
+#[derive(Clone, Debug, PartialEq)]
+enum UpdateState {
+    /// Nothing asked yet, or the check is not due.
+    Idle,
+    Checking,
+    /// A newer release exists.
+    Available(update::Release),
+    /// This is the newest release.
+    Current,
+    /// Downloaded, but not installed, and why.
+    Saved(std::path::PathBuf, String),
+    Failed(String),
+    Installing,
+    /// In place; it takes effect on the next start.
+    Installed(String),
+}
+
 /// Which queue entry a track belongs at after the output device was rebuilt.
 ///
 /// The device dying does not invalidate the run: the queue and the index into
@@ -656,6 +687,11 @@ pub struct App {
     demo: Option<Demo>,
     /// Whether the settings window is showing, and what the cache holds.
     show_settings: bool,
+    update_state: UpdateState,
+    /// What an update may do to this installation, worked out once at startup.
+    update_kind: update::InstallKind,
+    /// When the last check happened, for the once-a-day rule.
+    last_update_check: Option<u64>,
     cache_usage: (usize, u64),
     /// yt-dlp's self-reported version, asked for on demand.
     ytdlp_version: Option<String>,
@@ -836,6 +872,9 @@ impl App {
             want_more_results: false,
             demo: std::env::args().any(|arg| arg == "--demo").then(Demo::new),
             show_settings: false,
+            update_state: UpdateState::Idle,
+            update_kind: update::install_kind(),
+            last_update_check: cfg.ui.last_update_check,
             cache_usage: (0, 0),
             ytdlp_version: None,
             media,
@@ -1604,6 +1643,18 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::YtdlpVersion(version) => self.ytdlp_version = version,
+                Msg::UpdateChecked(Ok(Some(release))) => {
+                    self.update_state = UpdateState::Available(release);
+                }
+                Msg::UpdateChecked(Ok(None)) => self.update_state = UpdateState::Current,
+                Msg::UpdateChecked(Err(why)) => self.update_state = UpdateState::Failed(why),
+                Msg::UpdateInstalled(Ok((version, outcome))) => {
+                    self.update_state = match outcome {
+                        update::Outcome::Replaced => UpdateState::Installed(version),
+                        update::Outcome::Saved(path, why) => UpdateState::Saved(path, why),
+                    };
+                }
+                Msg::UpdateInstalled(Err(why)) => self.update_state = UpdateState::Failed(why),
                 Msg::MoreResults(result) => match result {
                     Ok((items, more)) => {
                         // An empty page means there was nothing left to add;
@@ -2893,6 +2944,75 @@ impl App {
 
     /// Ask the chosen yt-dlp for its version. Spawns a process, so it happens
     /// when the settings window opens rather than at startup.
+    /// Ask GitHub whether there is a newer release.
+    ///
+    /// The automatic check runs at most once a day: it is a request to somebody
+    /// else's server and nothing about it is urgent. The button in Settings
+    /// asks whenever it is pressed.
+    fn spawn_update_check(&mut self, ctx: &egui::Context) {
+        if matches!(
+            self.update_state,
+            UpdateState::Checking | UpdateState::Installing
+        ) {
+            return;
+        }
+        self.update_state = UpdateState::Checking;
+        self.last_update_check = Some(now_unix());
+        {
+            let mut cfg = Config::load();
+            cfg.ui.last_update_check = self.last_update_check;
+            let _ = cfg.save();
+        }
+        let http = self.img_http.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = update::check(&http, update::CURRENT).await;
+            let _ = tx.send(Msg::UpdateChecked(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn update_check_due(&self) -> bool {
+        const DAY: u64 = 24 * 60 * 60;
+        match self.last_update_check {
+            None => true,
+            Some(last) => now_unix().saturating_sub(last) >= DAY,
+        }
+    }
+
+    fn spawn_update_install(&mut self, ctx: &egui::Context, release: update::Release) {
+        self.update_state = UpdateState::Installing;
+        let kind = self.update_kind.clone();
+        let http = self.img_http.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let result = update::install(&http, &release, &kind)
+                .await
+                .map(|outcome| (release.version.clone(), outcome));
+            let _ = tx.send(Msg::UpdateInstalled(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Start the new build and step aside.
+    ///
+    /// The replacement is already on disk; this process is running from the old
+    /// inode, so it has to go for the new one to be what starts next.
+    fn restart_now(&mut self) {
+        let exe = match &self.update_kind {
+            update::InstallKind::AppImage(path) => path.clone(),
+            _ => std::env::current_exe().unwrap_or_default(),
+        };
+        // Save first: exiting this way skips the usual shutdown path.
+        self.save_ui_settings();
+        if std::process::Command::new(&exe).spawn().is_ok() {
+            std::process::exit(0);
+        }
+        self.status = Some("Could not restart; close and open the app again".to_string());
+    }
+
     fn spawn_ytdlp_version(&mut self, ctx: &egui::Context) {
         let Some(path) = self.ytdlp.clone() else {
             return;
@@ -2923,6 +3043,9 @@ impl App {
         let mut auth_changed = false;
         let mut refresh_auth = false;
         let mut clear_cache = false;
+        let mut check_updates = false;
+        let mut install_update: Option<update::Release> = None;
+        let mut restart = false;
 
         egui::Window::new("Settings")
             .collapsible(false)
@@ -3092,6 +3215,102 @@ impl App {
                 });
 
                 ui::card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(ui::title("Updates").size(15.0));
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(format!("version {}", update::CURRENT))
+                                .weak()
+                                .small(),
+                        );
+                    });
+                    match &self.update_state {
+                        UpdateState::Idle => {
+                            ui.label(RichText::new("Not checked yet.").weak().small());
+                        }
+                        UpdateState::Checking => {
+                            ui.label(RichText::new("Checking…").weak().small());
+                        }
+                        UpdateState::Current => {
+                            ui.label(
+                                RichText::new("This is the newest release.").weak().small(),
+                            );
+                        }
+                        UpdateState::Failed(why) => {
+                            ui.label(
+                                RichText::new(format!("Could not check: {why}"))
+                                    .color(ui::WARN)
+                                    .small(),
+                            );
+                        }
+                        UpdateState::Available(release) => {
+                            ui.label(
+                                RichText::new(format!("{} is available.", release.version))
+                                    .small(),
+                            );
+                            let explanation = match &self.update_kind {
+                                update::InstallKind::AppImage(_) => {
+                                    "The AppImage is replaced in place; restart to use it."
+                                }
+                                update::InstallKind::Bundle(_) => {
+                                    "The app and the tools beside it are replaced; restart to use it."
+                                }
+                                update::InstallKind::Managed => {
+                                    "This copy belongs to your package manager, so update it there."
+                                }
+                                update::InstallKind::Download => {
+                                    "It is downloaded to your Downloads folder to put in place yourself."
+                                }
+                            };
+                            ui.label(RichText::new(explanation).weak().small());
+                            ui.label(
+                                RichText::new(
+                                    "Checked against the checksum the release publishes, and \
+                                     installed only if it matches.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        }
+                        UpdateState::Installing => {
+                            ui.label(
+                                RichText::new("Downloading and verifying…").weak().small(),
+                            );
+                        }
+                        UpdateState::Installed(version) => {
+                            ui.label(
+                                RichText::new(format!("Updated to {version}. Restart to use it."))
+                                    .small(),
+                            );
+                        }
+                        UpdateState::Saved(path, why) => {
+                            ui.label(
+                                RichText::new(format!("Saved to {}", path.display())).small(),
+                            );
+                            ui.label(RichText::new(why.clone()).weak().small());
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui::quiet_button(ui, "Check now").clicked() {
+                            check_updates = true;
+                        }
+                        if let UpdateState::Available(release) = &self.update_state
+                            && !matches!(self.update_kind, update::InstallKind::Managed)
+                            && ui::pill_button(ui, &format!("Update to {}", release.version))
+                                .clicked()
+                        {
+                            install_update = Some(release.clone());
+                        }
+                        if matches!(self.update_state, UpdateState::Installed(_))
+                            && ui::quiet_button(ui, "Restart now").clicked()
+                        {
+                            restart = true;
+                        }
+                    });
+                });
+
+                ui::card(ui, |ui| {
                     ui.label(ui::title("Playback").size(15.0));
                     ui.add_space(2.0);
                     match &self.ytdlp {
@@ -3201,6 +3420,15 @@ impl App {
                 "Cleared {removed} cached tracks ({:.0} MB)",
                 freed as f64 / 1e6
             ));
+        }
+        if check_updates {
+            self.spawn_update_check(ctx);
+        }
+        if let Some(release) = install_update {
+            self.spawn_update_install(ctx, release);
+        }
+        if restart {
+            self.restart_now();
         }
         self.show_settings = open;
     }
@@ -3851,6 +4079,9 @@ impl eframe::App for App {
         }
 
         self.flush_pending_save(&ctx);
+        if self.update_state == UpdateState::Idle && self.update_check_due() {
+            self.spawn_update_check(&ctx);
+        }
         self.drain_messages(&ctx);
         self.handle_audio_errors(&ctx);
         self.handle_shortcuts(&ctx);

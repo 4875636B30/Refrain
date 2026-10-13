@@ -78,6 +78,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.7" date="2026-10-13">
+      <description>
+        <p>Settings checks for a newer release and installs it in place where
+           that is safe: an AppImage, or a tarball unpacked by hand. A copy
+           owned by a package manager is left alone. Downloads are checked
+           against the published checksum before anything is replaced.</p>
+      </description>
+    </release>
     <release version="0.1.6" date="2026-10-13">
       <description>
         <p>Playback keeps the queue when the audio device is rebuilt. It used

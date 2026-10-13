@@ -1,6 +1,6 @@
 [package]
 name = "refrain"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "A fast, low-memory desktop client for YouTube Music"
 license = "MIT"
@@ -34,10 +34,12 @@ souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.153"
 sha1 = "0.11.0"
+# Verifying a downloaded update against the checksum the release publishes.
+sha2 = "0.10.9"
 thiserror = "2.0.21"
+flate2 = "1"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
 toml = "1.1.8"
+# Unpacking a downloaded release tarball.
+tar = "0.4.44"
 
-[dev-dependencies]
-# Reading the gzipped fixtures in src/ytm/extract.rs tests.
-flate2 = "1"

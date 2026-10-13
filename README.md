@@ -35,7 +35,8 @@ password to hand over.
 | **Your library** | Thumbs up and down, playlists you can add to, rename, delete or remove tracks from, and an "Up next" queue. |
 | **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
 | **Themes** | Light and dark, persisted in the config. Roboto is bundled, so it looks the same on every desktop. |
-| **Settings** | Theme, sign-in source, cache size and clearing it, and yt-dlp status — all in-app, no config editing. |
+| **Settings** | Theme, sign-in source, cache size and clearing it, yt-dlp status, and updates — all in-app, no config editing. |
+| **Updates** | Settings checks for a newer release once a day, or on demand, and installs it in place where that is safe. The download is checked against the published `.sha256` first. |
 | **Keyboard** | Space, arrows, `Shift`+arrows, `/` and `Esc` — see [shortcuts](#keyboard-shortcuts). |
 
 ## Install
@@ -92,6 +93,11 @@ cp yt-dlp_linux ~/.local/bin/yt-dlp_linux
 The bundle contains `yt-dlp` so you don't have to install it yourself. `ffmpeg`
 is still needed, but only for the fallback that transcodes a stream the fast path
 couldn't use.
+
+Once installed this way, Settings → Updates replaces the app and the tools
+beside it when a newer release is out. An AppImage updates the same way; a copy
+owned by a package manager is left to its package manager, and the download
+goes to your Downloads folder instead.
 
 ### From source
 
