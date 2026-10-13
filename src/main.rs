@@ -184,11 +184,25 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // eframe sets this at runtime on Windows and macOS, and ignores it on
+    // Linux — where the icon comes from the desktop file instead, matched to
+    // the window by StartupWMClass. So this is not dead code on Linux, it is
+    // simply somebody else's job there.
+    let icon = image::load_from_memory(include_bytes!("../packaging/refrain-256.png"))
+        .expect("the app icon is embedded in the binary")
+        .to_rgba8();
+    let (width, height) = icon.dimensions();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 740.0])
             .with_min_inner_size([820.0, 520.0])
-            .with_title("Refrain"),
+            .with_title("Refrain")
+            .with_icon(egui::IconData {
+                rgba: icon.into_raw(),
+                width,
+                height,
+            }),
         ..Default::default()
     };
 

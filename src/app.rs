@@ -681,6 +681,10 @@ pub struct App {
     volume: f32,
     /// Last non-zero volume, for the mute toggle.
     last_volume: f32,
+    /// A setting changed and the config has not caught up yet.
+    pending_save: bool,
+    /// When it changed, so one drag does not write the file every frame.
+    pending_save_at: Instant,
     /// When we last rebuilt the audio device, to avoid hot-looping.
     last_audio_recovery: Option<Instant>,
     /// Count of transient buffer underruns, for throttled logging.
@@ -842,6 +846,8 @@ impl App {
             audio_error,
             volume,
             last_volume: if volume > 0.001 { volume } else { 0.8 },
+            pending_save: false,
+            pending_save_at: Instant::now(),
             last_audio_recovery: None,
             underruns: 0,
             last_thumb_scan: Instant::now() - Duration::from_secs(1),
@@ -2091,6 +2097,8 @@ impl App {
             media::Command::SetVolume(volume) => {
                 // The desktop asked, so the app's own volume follows it.
                 self.volume = (volume as f32).clamp(0.0, 1.0);
+                self.pending_save = true;
+                self.pending_save_at = Instant::now();
                 if self.volume > 0.001 {
                     self.last_volume = self.volume;
                 }
@@ -2409,6 +2417,27 @@ impl App {
             // Changing category re-runs the search for that category.
             self.run_search(ctx);
         }
+    }
+
+    /// Write the config once a change has settled.
+    ///
+    /// The volume is dragged, so saving every frame would rewrite the file
+    /// dozens of times for one gesture. A short delay makes it one write — and
+    /// the repaint request matters as much as the delay: without it the UI can
+    /// go to sleep before the write happens and the setting is lost, which is
+    /// what used to happen to the volume on the way out.
+    fn flush_pending_save(&mut self, ctx: &egui::Context) {
+        if !self.pending_save {
+            return;
+        }
+        const SETTLE: Duration = Duration::from_millis(800);
+        let waited = self.pending_save_at.elapsed();
+        if waited < SETTLE {
+            ctx.request_repaint_after(SETTLE - waited);
+            return;
+        }
+        self.pending_save = false;
+        self.save_ui_settings();
     }
 
     fn save_ui_settings(&self) {
@@ -3744,7 +3773,11 @@ impl App {
                 ui.add_space(10.0);
             });
 
-        self.volume = volume;
+        if (self.volume - volume).abs() > 0.001 {
+            self.volume = volume;
+            self.pending_save = true;
+            self.pending_save_at = Instant::now();
+        }
         self.shuffle = shuffle;
         self.repeat = repeat;
         self.show_queue = show_queue;
@@ -3777,6 +3810,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Nothing should be lost on the way out, even if the app is closed in the
+    /// same second the volume changed.
+    fn on_exit(&mut self) {
+        if self.pending_save {
+            self.save_ui_settings();
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
@@ -3785,6 +3826,7 @@ impl eframe::App for App {
             self.theme_applied = true;
         }
 
+        self.flush_pending_save(&ctx);
         self.drain_messages(&ctx);
         self.handle_audio_errors(&ctx);
         self.handle_shortcuts(&ctx);

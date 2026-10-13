@@ -11,4 +11,4 @@ Keywords=music;youtube;audio;player;streaming;
 StartupNotify=true
 # Must match the WM class the window sets, or the launcher shows a second
 # unnamed entry while the app is running.
-StartupWMClass=refrain
+StartupWMClass=Refrain

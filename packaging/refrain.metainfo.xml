@@ -78,6 +78,16 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.5" date="2026-10-13">
+      <description>
+        <p>The volume is saved when you change it. It used to be written only
+           when something else happened to save the config, so a volume set in
+           one session was often gone in the next.</p>
+        <p>The window carries its icon on Windows and macOS, and the desktop
+           entry now matches the window on Linux, so docks and taskbars show
+           the app rather than a placeholder.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-10-13">
       <description>
         <p>The search field and the category picker are one control now, so
