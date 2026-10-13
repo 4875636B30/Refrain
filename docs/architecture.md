@@ -399,7 +399,16 @@ that:
 Replacing means writing a temporary file in the same directory and renaming it
 over the target, so an interrupted write leaves the old file in place rather
 than half a new one. The running process keeps the old inode, which is why the
-card says to restart; the Restart button starts the new build and steps aside.
+card says to restart.
+
+The Restart button starts the new build and steps aside — with two details that
+are easy to get wrong. The child is started *without* the environment this
+process inherited: `APPIMAGE`, `APPDIR` and `LD_LIBRARY_PATH` point into a mount
+that disappears when this exits, and a child that inherits them can fail to come
+up. And the child is watched for a moment afterwards, because `spawn()` returning
+`Ok` only means fork and exec worked — a new build that falls over a second later
+would otherwise be completely silent, which is exactly what a button that "did
+nothing" looks like from the outside.
 
 ## Packaging
 
