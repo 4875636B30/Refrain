@@ -917,7 +917,7 @@ impl App {
             // the wrong yt-dlp" is a common and otherwise invisible problem.
             eprintln!("[yt-dlp] using {}", path.display());
         }
-        resolver::clean_stale_parts();
+        resolver::clean_scratch();
         // Enforcing the cache budget walks the whole directory, so keep it off
         // the startup path.
         std::thread::spawn(|| {

@@ -458,14 +458,54 @@ fn eviction_plan(
     plan
 }
 
-pub fn clean_stale_parts() {
+/// How old a scratch file must be before it is removed. A fresh one may belong
+/// to a fetch running in another instance of the app.
+const SCRATCH_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// Whether a name in the cache directory is scratch rather than a cached track.
+///
+/// Three shapes, from three writers: a stream buffer (`<id>.part`), a ranged
+/// fetch (`.<id>.fetch`), and the scratch directory yt-dlp unpacks into
+/// (`.<id>.<pid>.tmp`). Each is renamed into place on success and deleted on
+/// failure, so anything still here is from a run that was killed.
+fn is_scratch(name: &str) -> bool {
+    name.ends_with(".part")
+        || (name.starts_with('.') && (name.ends_with(".fetch") || name.ends_with(".tmp")))
+}
+
+/// Remove scratch files left behind by a fetch or a stream that was killed.
+///
+/// An app people close with the window manager leaves these behind constantly,
+/// and each one is a whole track: two killed fetches were 40 MB of audio nobody
+/// could play, which the eviction planner never saw because it only looks at
+/// `.m4a`.
+pub fn clean_scratch() {
     let Ok(entries) = std::fs::read_dir(cache_dir()) else {
         return;
     };
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !is_scratch(&name.to_string_lossy()) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|modified| {
+                SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default()
+                    >= SCRATCH_GRACE
+            })
+            .unwrap_or(false);
+        if !stale {
+            continue;
+        }
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "part") {
-            let _ = std::fs::remove_file(path);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -869,6 +909,21 @@ mod tests {
             &keep,
         );
         assert!(plan.is_empty(), "a kept track was evicted");
+    }
+
+    /// Scratch is recognised by name, so the cleaner can tell a half-finished
+    /// download from a cached track. Getting this wrong deletes someone's music.
+    #[test]
+    fn scratch_is_recognised_and_music_is_not() {
+        assert!(is_scratch("dQw4w9WgXcQ.part"));
+        assert!(is_scratch(".dQw4w9WgXcQ.fetch"));
+        assert!(is_scratch(".dQw4w9WgXcQ.94155.tmp"));
+
+        assert!(!is_scratch("dQw4w9WgXcQ.m4a"));
+        assert!(!is_scratch("downloads.jsonl"));
+        // The index's own temp file lives beside the audio directory, not in
+        // it, and does not start with a dot anyway.
+        assert!(!is_scratch("downloads.jsonl.tmp"));
     }
 }
 
