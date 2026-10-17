@@ -32,7 +32,8 @@ password to hand over.
 | **Search** | Songs, videos, albums, artists and playlists, grouped into categories with "See more" to expand one. |
 | **Browse** | Home and Library feeds, album / artist / playlist pages, cover-art grids, carousels and "quick picks". |
 | **Playback** | Streams through `yt-dlp` and caches to disk, so replays are instant. Seek, volume, shuffle, repeat, auto-advance. |
-| **Your library** | Thumbs up and down, playlists you can add to, rename, delete or remove tracks from, and an "Up next" queue. |
+| **Offline** | Everything you play is cached, and the Downloads view lists it with sizes and totals. Keep a track to protect it from eviction, remove one, or play with no network at all. |
+| **Your library** | Thumbs up and down, playlists you can add to, rename, delete or remove tracks from, and an "Up next" queue you can edit — play next, reorder, remove. |
 | **Desktop integration** | Media keys, the panel's media widget and `playerctl`, through MPRIS. |
 | **Themes** | Light and dark, persisted in the config. Roboto is bundled, so it looks the same on every desktop. |
 | **Settings** | Theme, sign-in source, cache size and clearing it, yt-dlp status, and updates — all in-app, no config editing. |
@@ -66,11 +67,19 @@ launch: right-click the app, choose **Open**, and confirm. (Or
 
 Both Apple silicon and Intel builds are published.
 
+**Built, but not yet run on real hardware.** Every release is compiled and
+smoke-tested on macOS in CI, but nobody has launched it on a Mac, so expect rough
+edges — please [open an issue](../../issues) if you hit one.
+
 ### Windows
 
 Download the `.zip` from [Releases](../../releases) and unzip it wherever you
 like — `refrain.exe` runs from there, with `yt-dlp.exe` beside it. SmartScreen
 will ask before running an unknown publisher's executable.
+
+**Built, but not yet run on real hardware.** Every release is compiled and
+smoke-tested on Windows in CI, but nobody has launched it on Windows, so expect
+rough edges — please [open an issue](../../issues) if you hit one.
 
 ### Release bundle (Linux x86_64)
 
@@ -114,11 +123,10 @@ cargo run --release
 **To run it:**
 
 - **`yt-dlp`** — found on `PATH`, at `~/.local/bin/yt-dlp`, or set `YTDLP_PATH`.
-  Every release bundle ships one for its platform.
-  The release bundle ships one, and if you have a *newer* copy elsewhere that
-  one is used instead: yt-dlp is the part that breaks when YouTube changes, so
-  a stale bundled copy would otherwise take playback down with it. Settings
-  shows which copy is in use and how old it is.
+  Every release bundle ships one for its platform, and if you have a *newer* copy
+  elsewhere that one is used instead: yt-dlp is the part that breaks when YouTube
+  changes, so a stale bundled copy would otherwise take playback down with it.
+  Settings shows which copy is in use and how old it is.
 - **A JavaScript runtime** — **not needed for a downloaded build**: every
   release carries QuickJS beside the executable, which is what yt-dlp uses to
   solve YouTube's JS challenges. Building from source, or installing from a
@@ -145,7 +153,7 @@ pure Rust.
 
 | | |
 | --- | --- |
-| **AUR** | `refrain-music-bin` — see [packaging/aur](packaging/aur) for the PKGBUILD and how to publish it |
+| **AUR** | `refrain-music-bin` is staged in [packaging/aur](packaging/aur) and verifies against each release, but is **not published yet** |
 | **Flathub** | manifest drafted in [packaging/flathub](packaging/flathub); not submitted yet, and the sandbox's sign-in story is still open |
 
 ## First run
@@ -191,7 +199,10 @@ Working today:
 - Home and Library feeds, with shelves paged in via continuations
 - Album, artist and playlist pages, with artwork and carousels
 - Streaming playback with on-disk write-through, prefetching and a download fallback
-- Thumbs up / down, playlist editing, shuffle, repeat, "Up next" queue
+- A Downloads view over the cache: sizes and totals, remove a track, and a "keep
+  offline" flag the eviction planner respects
+- Thumbs up / down, playlist editing, shuffle, repeat, and an editable "Up next"
+  queue (play next, reorder, remove)
 - MPRIS media controls, media keys and `playerctl`
 - Light and dark themes, with Roboto bundled rather than assumed
 - An in-app settings window: theme, sign-in refresh, cache size and clearing
@@ -200,13 +211,15 @@ Working today:
   instead of ~200)
 - Sign-in configurable in-app: source, browser and keyring
 - Linux (AppImage and tarball), macOS (`.app`, both architectures) and Windows
-  (`.zip`), each with `yt-dlp` shipped beside the executable
+  (`.zip`), each with `yt-dlp` shipped beside the executable — built and
+  smoke-tested in CI on all three, but only Linux has actually been run
 - Desktop media controls on all three: MPRIS, and the macOS and Windows
   equivalents through the same code
 
 Not built yet:
 
-- Packaging beyond the tarball (no Flatpak, AUR or `.deb` yet)
+- Packaging beyond the AppImage and tarball: the AUR package is staged but not
+  published, and there is no `.deb` or Flatpak
 
 Known limitations:
 
@@ -233,6 +246,8 @@ Useful diagnostics, all of which run without a GUI:
 
 ```sh
 cargo run -- --demo                   # scripted run, for screenshots and GIFs
+cargo run -- --downloads              # open straight to the Downloads view
+cargo run -- --underrun-test <id>     # play aloud, report stalls and dropouts
 cargo run -- --canary                 # check the live API and yt-dlp still work
 cargo run -- --auth-check             # sign-in diagnostics
 cargo run -- --probe "daft punk"      # exercise search + browse
