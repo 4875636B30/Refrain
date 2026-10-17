@@ -151,6 +151,8 @@ const IMAGE_UA: &str = thumbs::USER_AGENT;
 enum View {
     Search,
     Detail(Page),
+    /// What is in the audio cache.
+    Downloads,
 }
 
 /// A UI interaction collected while rendering, applied once the frame's
@@ -199,6 +201,12 @@ enum Action {
         from: usize,
         to: usize,
     },
+    /// Play a cached track from the Downloads list.
+    PlayDownload(String),
+    /// Mark a cached track as kept, or stop keeping it.
+    ToggleKeep(String),
+    /// Delete a cached track.
+    RemoveDownload(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,6 +214,7 @@ enum Nav {
     Home,
     Search,
     Library,
+    Downloads,
 }
 
 /// A stream opened before the user pressed play, so starting is instant.
@@ -811,6 +820,9 @@ pub struct App {
     /// When the last check happened, for the once-a-day rule.
     last_update_check: Option<u64>,
     cache_usage: (usize, u64),
+    /// What is in the audio cache, so the Downloads view can name it. Reloaded
+    /// when that view opens, since the directory changes underneath.
+    downloads: crate::audio::downloads::Downloads,
     /// yt-dlp's self-reported version, asked for on demand.
     ytdlp_version: Option<String>,
     /// Desktop media controls, if the desktop has any.
@@ -950,6 +962,9 @@ impl App {
         let auth_pref = cfg.auth.clone();
         let auth = crate::auth::cached_source().unwrap_or_else(|| cfg.auth.clone());
         let theme_light = cfg.ui.theme == "light";
+        // `--downloads` opens straight to the Downloads view: it is several
+        // clicks away otherwise, and a screenshot of it wants no clicks.
+        let downloads_first = std::env::args().any(|arg| arg == "--downloads");
         let mut app = Self {
             rt,
             client,
@@ -965,10 +980,18 @@ impl App {
             query: String::new(),
             filter: SearchFilter::All,
             last_search: None,
-            nav: Nav::Home,
+            nav: if downloads_first {
+                Nav::Downloads
+            } else {
+                Nav::Home
+            },
             theme_light,
             theme_applied: false,
-            view: View::Search,
+            view: if downloads_first {
+                View::Downloads
+            } else {
+                View::Search
+            },
             sections: Vec::new(),
             prev_sections: None,
             status,
@@ -1005,6 +1028,7 @@ impl App {
             update_kind: update::install_kind(),
             last_update_check: cfg.ui.last_update_check,
             cache_usage: (0, 0),
+            downloads: crate::audio::downloads::Downloads::load(),
             ytdlp_version: None,
             media,
             media_for: None,
@@ -1045,8 +1069,9 @@ impl App {
         };
         // Open on the home feed rather than a blank search page.
         // The demo script navigates for itself; loading Home first would only
-        // flash a personalised feed on screen.
-        if app.demo.is_none() {
+        // flash a personalised feed on screen. `--downloads` is the same: it
+        // asks for a particular view, and loading Home would replace it.
+        if app.demo.is_none() && !downloads_first {
             app.load_page(&cc.egui_ctx, "FEmusic_home".to_string(), false);
         }
         Ok(app)
@@ -1165,6 +1190,23 @@ impl App {
     fn note_play(&mut self, video_id: &str) {
         *self.play_counts.entry(video_id.to_string()).or_insert(0) += 1;
         save_play_counts(&self.play_counts);
+    }
+
+    /// Remember what a cached track is called.
+    ///
+    /// The cache is files named after video ids, and a completed download
+    /// carries only an id, so the metadata has to come from somewhere. The
+    /// pending play and the queue are where these ids came from.
+    fn note_cached(&mut self, video_id: &str) {
+        let track = self
+            .pending_play
+            .as_ref()
+            .filter(|track| track.video_id == video_id)
+            .or_else(|| self.queue.iter().find(|track| track.video_id == video_id))
+            .cloned();
+        if let Some(track) = track {
+            self.downloads.record(&track);
+        }
     }
 
     fn spawn_history(&mut self, ctx: &egui::Context) {
@@ -1452,6 +1494,12 @@ impl App {
             return;
         };
         let path = resolver::cache_path(&track.video_id);
+        // Anything played ends up in the cache: a stream is renamed into place
+        // when it finishes downloading. So its metadata belongs in the index.
+        // Recorded here rather than on completion because the file appears
+        // asynchronously and nothing announces it — and a record whose file
+        // never arrives is dropped the next time the index is read.
+        self.downloads.record(&track);
         // Cached tracks need no network, so they can play immediately. Anything
         // else must wait until we know a concrete cookie source, or the
         // anonymous download would be bot-blocked.
@@ -1694,6 +1742,33 @@ impl App {
             Action::QueueRemove(idx) => self.remove_from_queue(ctx, idx),
             Action::QueueMove { from, to } => {
                 self.current = queue_reorder(&mut self.queue, self.current, from, to);
+            }
+            Action::PlayDownload(video_id) => {
+                // A run of its own: the point is to play this file, not to
+                // rebuild whatever list it originally came from.
+                if let Some(item) = self
+                    .downloads
+                    .cached()
+                    .into_iter()
+                    .find(|item| item.track.video_id == video_id)
+                {
+                    self.queue = vec![item.track];
+                    self.play_index(ctx, 0);
+                }
+            }
+            Action::ToggleKeep(video_id) => {
+                let keep = !self.downloads.is_kept(&video_id);
+                self.downloads.set_keep(&video_id, keep);
+                self.status = Some(if keep {
+                    "Kept offline — it will not be evicted".to_string()
+                } else {
+                    "No longer kept offline".to_string()
+                });
+            }
+            Action::RemoveDownload(video_id) => {
+                let _ = std::fs::remove_file(resolver::cache_path(&video_id));
+                self.downloads.forget(&video_id);
+                self.cache_usage = resolver::cache_usage();
             }
             Action::LoadMoreTracks => {
                 if let View::Detail(page) = &self.view
@@ -1965,6 +2040,7 @@ impl App {
                         .unwrap_or(false);
                     match result {
                         Ok(path) => {
+                            self.note_cached(&video_id);
                             if is_pending && let Some(track) = self.pending_play.take() {
                                 self.play_path(&path, track);
                             }
@@ -2504,6 +2580,9 @@ impl App {
                 if nav_button(ui, &mut nav, Nav::Library, "📚   Library") {
                     activated = Some(Nav::Library);
                 }
+                if nav_button(ui, &mut nav, Nav::Downloads, "📥   Downloads") {
+                    activated = Some(Nav::Downloads);
+                }
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(8.0);
@@ -2536,6 +2615,12 @@ impl App {
                 Nav::Search => self.view = View::Search,
                 Nav::Library => {
                     self.load_page(ctx, "FEmusic_library_landing".to_string(), true);
+                }
+                Nav::Downloads => {
+                    // Reloaded rather than kept: the cache changes underneath as
+                    // tracks are played, warmed and evicted.
+                    self.downloads = crate::audio::downloads::Downloads::load();
+                    self.view = View::Downloads;
                 }
             }
         }
@@ -2841,6 +2926,7 @@ impl App {
                     View::Detail(page) => {
                         self.detail_view(ui, page, &current_video, &mut action, &mut hovered)
                     }
+                    View::Downloads => self.downloads_view(ui, &current_video, &mut action),
                 });
             self.feed_extent = (feed.content_size.y, feed.inner_rect.height());
             self.feed_momentum.set_offset(feed.state.offset.y);
@@ -2974,6 +3060,7 @@ impl App {
                 false,
                 true,
                 false,
+                None,
                 item.playable(),
                 item.navigable(),
             );
@@ -3066,6 +3153,7 @@ impl App {
                 playlist_id.is_some(),
                 true,
                 false,
+                None,
                 true,
                 false,
             );
@@ -4242,6 +4330,101 @@ impl App {
         });
     }
 
+    /// What is cached, and what is kept.
+    ///
+    /// Every row here plays from disk, so this doubles as the offline view:
+    /// `play_at` uses the cache file before it considers the network at all.
+    fn downloads_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        current_video: &Option<String>,
+        action: &mut Option<Action>,
+    ) {
+        let cached = self.downloads.cached();
+        let total: u64 = cached.iter().map(|item| item.size).sum();
+        let kept = cached.iter().filter(|item| item.keep).count();
+
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.label(ui::title("Downloads").size(20.0));
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} tracks · {} of {} · {kept} kept",
+                    cached.len(),
+                    ui::fmt_bytes(total),
+                    ui::fmt_bytes(resolver::CACHE_BUDGET_BYTES)
+                ))
+                .weak()
+                .small(),
+            );
+        });
+        ui.add_space(10.0);
+
+        if cached.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.label(
+                    RichText::new("Nothing cached yet — anything you play is kept here.").weak(),
+                );
+            });
+            return;
+        }
+
+        let active = self.audio.as_ref().map(|a| a.is_playing()).unwrap_or(false);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for item in &cached {
+                    let track = &item.track;
+                    let selected = current_video.as_deref() == Some(track.video_id.as_str());
+                    let mut segments: Vec<(String, Option<String>)> = Vec::new();
+                    for (position, artist) in track.artists.iter().enumerate() {
+                        if position > 0 {
+                            segments.push((", ".to_string(), None));
+                        }
+                        segments.push((artist.clone(), track.artist_ids.get(position).cloned()));
+                    }
+                    // Size earns the trailing slot rather than duration: this
+                    // page is about what is on disk.
+                    let trailing = if item.keep {
+                        format!("{} · kept", ui::fmt_bytes(item.size))
+                    } else {
+                        ui::fmt_bytes(item.size)
+                    };
+                    let row = ui::list_row(
+                        ui,
+                        &self.thumbnails,
+                        ("download", &track.video_id),
+                        track.thumbnail.as_deref(),
+                        &track.title,
+                        &segments,
+                        Some(trailing.as_str()),
+                        None,
+                        selected,
+                        active,
+                        false,
+                        false,
+                        false,
+                        Some(item.keep),
+                        true,
+                        false,
+                    );
+                    if row.keep_toggled {
+                        *action = Some(Action::ToggleKeep(track.video_id.clone()));
+                    } else if row.remove_download {
+                        *action = Some(Action::RemoveDownload(track.video_id.clone()));
+                    } else if row.clicked {
+                        *action = Some(Action::PlayDownload(track.video_id.clone()));
+                    }
+                }
+                ui.add_space(10.0);
+            });
+    }
+
     /// YouTube Music's "Up next" list. Reuses the ordinary row so the playing
     /// track carries the same equaliser marker it has everywhere else.
     fn queue_panel(
@@ -4315,6 +4498,7 @@ impl App {
                         false,
                         false,
                         true,
+                        None,
                         true,
                         false,
                     );

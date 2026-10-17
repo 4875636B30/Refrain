@@ -15,12 +15,13 @@ mod update;
 mod ytm;
 
 /// Every option the dispatcher above knows about, for the typo warning.
-const KNOWN_FLAGS: [&str; 20] = [
+const KNOWN_FLAGS: [&str; 21] = [
     "--auth-check",
     "--canary",
     "--decode",
     "--demo",
     "--download",
+    "--downloads",
     "--fps",
     "--help",
     "--like-status",
@@ -42,6 +43,7 @@ const USAGE: &str = "Refrain — a desktop client for YouTube Music.
 
   refrain                      open the app
   refrain --demo               run the scripted demo
+  refrain --downloads          open on the Downloads view
   refrain --fps                print the frame rate the platform delivers
   refrain --canary             check yt-dlp, the JavaScript runtime and the API
   refrain --play-test <id>     play a track muted, and assert that it plays

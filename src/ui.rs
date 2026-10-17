@@ -693,6 +693,10 @@ pub struct RowOutcome {
     /// "Move up" / "Move down" were chosen (queue rows only).
     pub move_up: bool,
     pub move_down: bool,
+    /// The keep toggle was chosen on a downloaded row.
+    pub keep_toggled: bool,
+    /// "Remove download" was chosen.
+    pub remove_download: bool,
 }
 
 /// YouTube Music marks the playing row with a small equaliser where the track
@@ -746,6 +750,9 @@ pub fn list_row(
     // offers the queue's own edits, which only make sense for a row in it.
     can_queue: bool,
     in_queue: bool,
+    // `Some(kept)` when this row is a downloaded track: it offers the keep
+    // toggle and removal, and its label depends on whether it is kept already.
+    download: Option<bool>,
     playable: bool,
     navigable: bool,
 ) -> RowOutcome {
@@ -843,6 +850,8 @@ pub fn list_row(
     let mut remove_from_queue = false;
     let mut move_up = false;
     let mut move_down = false;
+    let mut keep_toggled = false;
+    let mut remove_download = false;
     response.context_menu(|ui| {
         if can_queue {
             if ui.button("Play next").clicked() {
@@ -880,6 +889,18 @@ pub fn list_row(
                 ui.close();
             }
         }
+        if let Some(kept) = download {
+            ui.separator();
+            let label = if kept { "Stop keeping" } else { "Keep offline" };
+            if ui.button(label).clicked() {
+                keep_toggled = true;
+                ui.close();
+            }
+            if ui.button("Remove download").clicked() {
+                remove_download = true;
+                ui.close();
+            }
+        }
     });
 
     RowOutcome {
@@ -893,6 +914,8 @@ pub fn list_row(
         remove_from_queue,
         move_up,
         move_down,
+        keep_toggled,
+        remove_download,
     }
 }
 

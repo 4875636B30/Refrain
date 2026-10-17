@@ -22,7 +22,10 @@ impl LikeStatus {
 }
 
 /// A playable song / video.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+// Missing fields fall back to `Default` rather than failing the whole record,
+// so a future field does not invalidate every cached entry.
+#[serde(default)]
 pub struct Track {
     pub video_id: String,
     pub title: String,

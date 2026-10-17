@@ -6,6 +6,7 @@
 //! `~/.cache/refrain/audio/<video_id>.m4a`, so replaying a track is
 //! instant and seeking works.
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -394,7 +395,14 @@ pub fn prune_cache() -> (usize, u64) {
         files.push((meta.modified().unwrap_or(UNIX_EPOCH), meta.len(), path));
     }
 
-    let plan = eviction_plan(files, CACHE_BUDGET_BYTES, SystemTime::now(), CACHE_PROTECT);
+    let keep = crate::audio::downloads::Downloads::load().keep_set();
+    let plan = eviction_plan(
+        files,
+        CACHE_BUDGET_BYTES,
+        SystemTime::now(),
+        CACHE_PROTECT,
+        &keep,
+    );
     let (mut removed, mut freed) = (0usize, 0u64);
     for (size, path) in plan {
         if std::fs::remove_file(&path).is_ok() {
@@ -409,11 +417,16 @@ pub fn prune_cache() -> (usize, u64) {
 /// budget. Anything touched within `protect` is left alone — it may be the
 /// track that is playing, one being warmed, or a fetch still in flight, and
 /// evicting those would be far worse than being briefly over budget.
+///
+/// `keep` is the set of tracks asked for deliberately. Those are never dropped,
+/// whatever the budget says: if they alone exceed it the cache stays over
+/// budget, because "keep this" that quietly stops keeping it is worth nothing.
 fn eviction_plan(
     files: Vec<(SystemTime, u64, PathBuf)>,
     budget: u64,
     now: SystemTime,
     protect: Duration,
+    keep: &HashSet<String>,
 ) -> Vec<(u64, PathBuf)> {
     let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
     if total <= budget {
@@ -429,6 +442,14 @@ fn eviction_plan(
             break;
         }
         if now.duration_since(touched).unwrap_or_default() < protect {
+            continue;
+        }
+        // Cached files are named after their video id, so the stem is the key.
+        if path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|id| keep.contains(id))
+        {
             continue;
         }
         total -= size;
@@ -757,7 +778,13 @@ mod tests {
     #[test]
     fn keeps_everything_under_budget() {
         let files = vec![file(60, 100, "a"), file(120, 100, "b")];
-        let plan = eviction_plan(files, 1000, SystemTime::now(), Duration::from_secs(10));
+        let plan = eviction_plan(
+            files,
+            1000,
+            SystemTime::now(),
+            Duration::from_secs(10),
+            &HashSet::new(),
+        );
         assert!(plan.is_empty());
     }
 
@@ -771,7 +798,13 @@ mod tests {
         ];
         // 1200 bytes held, budget 500: dropping the two oldest leaves 400.
         // The protection window is short here so all three are eligible.
-        let plan = eviction_plan(files, 500, SystemTime::now(), Duration::from_secs(60));
+        let plan = eviction_plan(
+            files,
+            500,
+            SystemTime::now(),
+            Duration::from_secs(60),
+            &HashSet::new(),
+        );
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].1, PathBuf::from("oldest"));
         assert_eq!(plan[1].1, PathBuf::from("middle"));
@@ -783,7 +816,13 @@ mod tests {
     fn never_evicts_recently_touched_files() {
         let files = vec![file(3600, 800, "stale"), file(1, 800, "in-use")];
         // Budget forces eviction, but only the stale file may go.
-        let plan = eviction_plan(files, 800, SystemTime::now(), Duration::from_secs(600));
+        let plan = eviction_plan(
+            files,
+            800,
+            SystemTime::now(),
+            Duration::from_secs(600),
+            &HashSet::new(),
+        );
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].1, PathBuf::from("stale"));
     }
@@ -793,8 +832,43 @@ mod tests {
     #[test]
     fn stays_over_budget_when_all_protected() {
         let files = vec![file(1, 800, "a"), file(2, 800, "b")];
-        let plan = eviction_plan(files, 100, SystemTime::now(), Duration::from_secs(600));
+        let plan = eviction_plan(
+            files,
+            100,
+            SystemTime::now(),
+            Duration::from_secs(600),
+            &HashSet::new(),
+        );
         assert!(plan.is_empty());
+    }
+
+    /// A kept track is never evicted, however old it is — that is the whole
+    /// point of asking to keep it. And if the kept tracks alone exceed the
+    /// budget, the cache stays over budget rather than dropping what was kept.
+    #[test]
+    fn never_evicts_a_kept_track() {
+        let keep: HashSet<String> = ["kept".to_string()].into_iter().collect();
+
+        let files = vec![file(3600, 800, "kept.m4a"), file(3600, 800, "loose.m4a")];
+        let plan = eviction_plan(
+            files,
+            800,
+            SystemTime::now(),
+            Duration::from_secs(60),
+            &keep,
+        );
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].1, PathBuf::from("loose.m4a"));
+
+        let files = vec![file(3600, 800, "kept.m4a")];
+        let plan = eviction_plan(
+            files,
+            100,
+            SystemTime::now(),
+            Duration::from_secs(60),
+            &keep,
+        );
+        assert!(plan.is_empty(), "a kept track was evicted");
     }
 }
 
