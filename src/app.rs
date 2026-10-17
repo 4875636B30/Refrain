@@ -1023,7 +1023,10 @@ impl App {
             search_more: None,
             want_more_results: false,
             demo: std::env::args().any(|arg| arg == "--demo").then(Demo::new),
-            show_settings: false,
+            // `--settings` opens the settings window on startup, for the same
+            // reason `--downloads` exists: it is several clicks away otherwise,
+            // and a screenshot of it wants no clicks.
+            show_settings: std::env::args().any(|arg| arg == "--settings"),
             update_state: UpdateState::Idle,
             update_kind: update::install_kind(),
             last_update_check: cfg.ui.last_update_check,
@@ -3492,10 +3495,26 @@ impl App {
         let mut install_update: Option<update::Release> = None;
         let mut restart = false;
 
+        // The cards are tall — seven of them against a window that can be 520
+        // points high — and the window used to grow to fit them, so at a small
+        // window size it ran off both ends of the screen and took its own close
+        // button off the top with it. Give it a height that fits on screen and
+        // let the body scroll, so the close button always has somewhere to be.
+        //
+        // Pinned at both ends rather than only capped: the body is a scroll area
+        // that fills whatever it is handed, so the window otherwise keeps
+        // whatever size it started at. `max` is what makes it safe — it is
+        // re-applied every frame, so shrinking the window shrinks the panel with
+        // it — and `min` is what stops it being needlessly small.
+        let height = (ctx.content_rect().height() - 48.0).clamp(240.0, 760.0);
         egui::Window::new("Settings")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_size([500.0, height])
+            .min_height(height)
+            .max_height(height)
+            .vscroll(true)
             .open(&mut open)
             .show(ctx, |ui| {
                 // Wide enough for a path to sit on one line, and grouped into
