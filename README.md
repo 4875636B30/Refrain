@@ -260,7 +260,8 @@ cargo run -- --like-status <video_id> # read a track's rating (read-only)
 ```
 
 Design notes, and the parts that turned out to be less obvious than they looked,
-are in **[docs/architecture.md](docs/architecture.md)**.
+are in **[docs/architecture.md](docs/architecture.md)**. What changed in each
+release is in **[CHANGELOG.md](CHANGELOG.md)**.
 
 Contributions are welcome — issues and pull requests both. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up, what CI checks, and the few

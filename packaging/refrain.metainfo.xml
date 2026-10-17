@@ -78,6 +78,18 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.2.0" date="2026-10-17">
+      <description>
+        <p>The cache is visible and manageable. A Downloads view lists what is
+           cached with sizes and a total, a "keep offline" flag protects a track
+           from eviction, and rows play straight from disk — so it works with no
+           network at all.</p>
+        <p>Alongside it: settings could not be closed at a small window size, a
+           second copy of the app panicked over the media-control name, killed
+           runs left whole tracks behind in the cache, and signing in went
+           unnoticed when the browser had signed in since the last extraction.</p>
+      </description>
+    </release>
     <release version="0.1.19" date="2026-10-14">
       <description>
         <p>Signing in is picked up again. A cached cookie jar with no YouTube
