@@ -1,6 +1,6 @@
 pkgbase = refrain-music-bin
 	pkgdesc = Fast, low-memory desktop client for YouTube Music
-	pkgver = 0.1.19
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/4875636B30/Refrain
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = refrain-music-bin
 	optdepends = nodejs: alternative JavaScript runtime
 	optdepends = deno: alternative JavaScript runtime
 	optdepends = ffmpeg: transcodes a stream the fast path could not use
-	source = refrain-music-bin-0.1.19.tar.gz::https://github.com/4875636B30/Refrain/releases/download/v0.1.19/refrain-0.1.19-linux-x86_64.tar.gz
-	sha256sums = bf80cf91818dcfa7ed5af1fb1429b51494e1d5eb4b49ffd1f8d792d9081682c1
+	source = refrain-music-bin-0.2.0.tar.gz::https://github.com/4875636B30/Refrain/releases/download/v0.2.0/refrain-0.2.0-linux-x86_64.tar.gz
+	sha256sums = 463d8caa1c46182ef59a07e3a5045d8b982f191ebffcdb9ee5adc4917ac5e645
 
 pkgname = refrain-music-bin

@@ -4,7 +4,7 @@
 # pushing, or there is nobody to blame when it breaks.
 
 pkgname=refrain-music-bin
-pkgver=0.1.19
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Fast, low-memory desktop client for YouTube Music"
 arch=('x86_64')
@@ -35,7 +35,7 @@ optdepends=(
 # would be both confusing and rude.
 
 source=("${pkgname}-${pkgver}.tar.gz::${url}/releases/download/v${pkgver}/refrain-${pkgver}-linux-x86_64.tar.gz")
-sha256sums=('bf80cf91818dcfa7ed5af1fb1429b51494e1d5eb4b49ffd1f8d792d9081682c1')
+sha256sums=('463d8caa1c46182ef59a07e3a5045d8b982f191ebffcdb9ee5adc4917ac5e645')
 
 package() {
   local bundle="${srcdir}/refrain-${pkgver}-linux-x86_64"
