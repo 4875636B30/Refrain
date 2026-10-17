@@ -45,3 +45,9 @@ toml = "1.1.8"
 # Unpacking a downloaded release tarball.
 tar = "0.4.44"
 
+# Asking the session bus who owns our MPRIS name, so a second instance can leave
+# the media controls to the first rather than panicking inside souvlaki. Already
+# in the graph: souvlaki's zbus backend depends on it.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+

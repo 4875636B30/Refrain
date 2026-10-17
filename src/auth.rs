@@ -333,6 +333,48 @@ fn cached_cookies() -> Option<Vec<Cookie>> {
     (!cookies.is_empty()).then_some(cookies)
 }
 
+/// Where a browser keeps its cookie database, as far as the stored profile says.
+///
+/// Chromium-family browsers keep it under the profile directory, and recent
+/// versions moved it to `Network/`; Firefox keeps `cookies.sqlite` in the
+/// profile root. Every layout is tried, because the remembered profile is
+/// whatever yt-dlp accepted rather than a shape we chose.
+fn cookie_databases(source: &AuthConfig) -> Vec<PathBuf> {
+    let profile = PathBuf::from(&source.profile);
+    let mut out = Vec::new();
+    for dir in [profile.clone(), profile.join("Default")] {
+        out.push(dir.join("Network").join("Cookies"));
+        out.push(dir.join("Cookies"));
+    }
+    out.push(profile.join("cookies.sqlite"));
+    out
+}
+
+/// Whether the browser has written cookies since we last dumped them.
+///
+/// Extraction exists to snapshot the browser's cookies, and it is the expensive
+/// part of signing in. If the store has not been touched since the dump then the
+/// dump is still current, and extracting again would produce the same jar — so
+/// there is nothing to look for and no reason to pay. An unknown answer searches:
+/// missing a sign-in is worse than a wasted extraction.
+fn store_changed_since(source: &AuthConfig, dump: &Path) -> bool {
+    let Ok(dumped) = std::fs::metadata(dump).and_then(|meta| meta.modified()) else {
+        return true;
+    };
+    let newest = cookie_databases(source)
+        .iter()
+        .filter_map(|path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+        .max();
+    match newest {
+        Some(newest) => newest > dumped,
+        None => true,
+    }
+}
+
 /// Drop the cached cookie jar (and remembered source), forcing re-extraction.
 pub fn clear_cache() {
     let _ = std::fs::remove_file(cookies_file_path());
@@ -342,18 +384,20 @@ pub fn clear_cache() {
 /// Resolve cookies according to the config, reusing a recent extraction.
 pub async fn resolve(config: &Config) -> Result<Option<ResolvedAuth>> {
     // Fast path: a fresh jar plus a remembered source means no yt-dlp at all.
-    //
-    // Only a jar that carries a real session is reused that way. A jar without
-    // one is anonymous, and reusing it is exactly how the app stopped noticing
-    // that the user had signed in since: the cached jar kept saying "no
-    // session" until it expired, so sign-in appeared to have stopped working.
-    // Searching instead costs a few seconds of yt-dlp, in the background, and
-    // only when there is no session to use.
     if !matches!(config.auth.mode, AuthMode::None | AuthMode::File)
         && let (Some(source), Some(cookies)) = (cached_source(), cached_cookies())
     {
         let jar = CookieJar::new(cookies);
-        if jar.has_youtube_session() {
+        // A jar carrying a session is worth reusing as it stands.
+        //
+        // One without is anonymous — but it is also our snapshot of the browser,
+        // so it can only be out of date if the browser has written cookies since
+        // we took it. That comparison is what stops an anonymous launch from
+        // spending seconds of yt-dlp to learn nothing. Both failure modes this
+        // replaces are worth remembering: reusing such a jar forever meant
+        // signing in went unnoticed, and never reusing it meant a search on
+        // every single launch.
+        if jar.has_youtube_session() || !store_changed_since(&source, &cookies_file_path()) {
             return Ok(Some(ResolvedAuth { source, jar }));
         }
     }
@@ -572,4 +616,66 @@ pub fn detected_sources() -> Vec<String> {
         .into_iter()
         .map(|(browser, path)| format!("{browser}  ({})", path.display()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The layouts the two browser families use. Missing one means the freshness
+    /// check finds nothing to compare and searches every time, which is the cost
+    /// it exists to avoid.
+    #[test]
+    fn cookie_databases_covers_both_layouts() {
+        let source = AuthConfig {
+            profile: "/data/brave".to_string(),
+            ..Default::default()
+        };
+        let found: Vec<String> = cookie_databases(&source)
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        for expected in [
+            "/data/brave/Default/Cookies",
+            "/data/brave/Default/Network/Cookies",
+            "/data/brave/Cookies",
+            "/data/brave/cookies.sqlite",
+        ] {
+            assert!(found.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    /// The whole point: an untouched store means the dump is still current, and a
+    /// touched one means it might hold a session now.
+    #[test]
+    fn a_store_written_since_the_dump_is_noticed() {
+        let dir = std::env::temp_dir().join("refrain-cookie-freshness");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Default")).unwrap();
+        let dump = dir.join("cookies.txt");
+        let store = dir.join("Default").join("Cookies");
+
+        let source = AuthConfig {
+            profile: dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        // The store is written first, then the dump: the dump is current.
+        std::fs::write(&store, "a").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&dump, "b").unwrap();
+        assert!(!store_changed_since(&source, &dump));
+
+        // Now the browser writes, so the dump is stale.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&store, "c").unwrap();
+        assert!(store_changed_since(&source, &dump));
+
+        // Nothing to compare against: search rather than assume.
+        let unknown = AuthConfig {
+            profile: dir.join("nope").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(store_changed_since(&unknown, &dump));
+    }
 }

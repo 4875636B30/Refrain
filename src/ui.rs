@@ -1409,4 +1409,47 @@ mod momentum_tests {
         momentum.push(500.0);
         assert_eq!(momentum.advance(1.0 / 60.0, 300.0, 600.0), 0.0);
     }
+
+    /// What the glide actually is, in numbers. The tests above only say it moves
+    /// and stops; this pins how far and how long, so the feel cannot drift
+    /// without somebody deciding to change it.
+    #[test]
+    fn a_flick_carries_a_predictable_distance_over_a_predictable_time() {
+        let mut momentum = ScrollMomentum::default();
+        momentum.push(1000.0);
+
+        let mut travelled = 0.0;
+        let mut frames = 0;
+        while momentum.is_gliding() && frames < 600 {
+            travelled = momentum.advance(1.0 / 60.0, 1_000_000.0, 600.0);
+            frames += 1;
+        }
+        let seconds = frames as f32 / 60.0;
+        assert!(
+            (105.0..135.0).contains(&travelled),
+            "a 1000/s flick carried {travelled} points"
+        );
+        assert!((0.7..1.2).contains(&seconds), "the glide lasted {seconds}s");
+    }
+
+    /// Distance is proportional to the flick, so a harder one goes further
+    /// rather than merely faster — which is what makes it read as momentum.
+    #[test]
+    fn distance_scales_with_the_flick() {
+        let carry = |velocity: f32| {
+            let mut momentum = ScrollMomentum::default();
+            momentum.push(velocity);
+            let mut offset = 0.0;
+            while momentum.is_gliding() {
+                offset = momentum.advance(1.0 / 60.0, 1_000_000.0, 600.0);
+            }
+            offset
+        };
+        let once = carry(500.0);
+        let twice = carry(1000.0);
+        assert!(
+            (twice / once - 2.0).abs() < 0.05,
+            "500/s carried {once}, 1000/s carried {twice}"
+        );
+    }
 }

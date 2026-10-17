@@ -17,6 +17,11 @@ use souvlaki::{
 /// How far a bare "seek" media key moves, when the desktop doesn't say.
 const SEEK_STEP: Duration = Duration::from_secs(5);
 
+/// The MPRIS name clients look for. souvlaki builds it as
+/// `org.mpris.MediaPlayer2.<dbus_name>`, so the two have to agree.
+const MPRIS_NAME: &str = "org.mpris.MediaPlayer2.refrain";
+const DBUS_NAME: &str = "refrain";
+
 /// A request from the desktop's media controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
@@ -50,10 +55,19 @@ impl Controls {
         on_command: impl Fn(Command) + Send + 'static,
     ) -> Self {
         let config = PlatformConfig {
-            dbus_name: "refrain",
+            dbus_name: DBUS_NAME,
             display_name: "Refrain",
             hwnd,
         };
+
+        // souvlaki's `attach` returns before it knows whether the name was free,
+        // and panics inside its own thread when it was not — so a second
+        // instance printed a panic and then had no media controls at all, while
+        // still reporting that it had connected. Ask the bus first and leave the
+        // controls to whoever holds them.
+        if mpris_name_is_taken(MPRIS_NAME) {
+            return Self { inner: None };
+        }
 
         let Ok(mut inner) = MediaControls::new(config) else {
             return Self { inner: None };
@@ -168,6 +182,35 @@ fn signed(amount: Duration, direction: SeekDirection) -> i64 {
         SeekDirection::Forward => amount,
         SeekDirection::Backward => -amount,
     }
+}
+
+/// Whether another instance already holds the MPRIS name.
+///
+/// `GetNameOwner` fails when nobody owns the name, which is the answer we want —
+/// so anything other than a successful reply reads as "not taken", and the app
+/// tries as it always did. Not being able to ask at all (no session bus) is the
+/// same: souvlaki will fail to connect and that is already handled.
+#[cfg(target_os = "linux")]
+fn mpris_name_is_taken(name: &str) -> bool {
+    let Ok(connection) = zbus::blocking::Connection::session() else {
+        return false;
+    };
+    connection
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetNameOwner",
+            &(name,),
+        )
+        .is_ok()
+}
+
+/// MPRIS is Linux's; elsewhere souvlaki uses a platform backend with no name to
+/// collide over.
+#[cfg(not(target_os = "linux"))]
+fn mpris_name_is_taken(_name: &str) -> bool {
+    false
 }
 
 #[cfg(test)]
