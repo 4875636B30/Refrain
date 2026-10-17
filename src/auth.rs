@@ -631,17 +631,18 @@ mod tests {
             profile: "/data/brave".to_string(),
             ..Default::default()
         };
-        let found: Vec<String> = cookie_databases(&source)
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
+        // Compared as paths, because joining with `PathBuf` is what the check
+        // itself does. A literal "/data/brave/Default/Cookies" is a different
+        // string on Windows, where this passed here and failed in CI.
+        let base = PathBuf::from("/data/brave");
+        let found = cookie_databases(&source);
         for expected in [
-            "/data/brave/Default/Cookies",
-            "/data/brave/Default/Network/Cookies",
-            "/data/brave/Cookies",
-            "/data/brave/cookies.sqlite",
+            base.join("Default").join("Cookies"),
+            base.join("Default").join("Network").join("Cookies"),
+            base.join("Cookies"),
+            base.join("cookies.sqlite"),
         ] {
-            assert!(found.contains(&expected.to_string()), "missing {expected}");
+            assert!(found.contains(&expected), "missing {}", expected.display());
         }
     }
 
